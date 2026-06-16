@@ -1,0 +1,22 @@
+﻿.env
+__pycache__/
+*.pyc
+*.log
+
+# 本地数据 / 客户记录，不上传 GitHub
+chat_history.json
+memory.json
+customer_profiles.json
+deposits.json
+deposit_upload_log.json
+orders.json
+admin_pending*.json
+admin_priority_log.json
+last_webhook_payload.json
+wati_send_log.json
+wati_clean_send_log.json
+raw_webhook_debug.json
+
+# 补丁和备份文件，不上传 GitHub
+app_backup_*.py
+patch_*.py
