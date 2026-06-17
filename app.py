@@ -2489,6 +2489,446 @@ def yome_debug_deposit_log():
     return _dep_jsonify(dep_load_json(DEPOSIT_LOG_JSON, []))
 
 
+
+# =============================
+# YOME AI V2.3 地址/配送/Google Maps 修复
+# Delivery + Address + Google Maps priority
+# =============================
+
+import re as _v23_re
+import json as _v23_json
+from pathlib import Path as _v23_Path
+from datetime import datetime as _v23_datetime
+from flask import request as _v23_request, jsonify as _v23_jsonify
+
+try:
+    APP_DIR
+except NameError:
+    APP_DIR = _v23_Path("C:/yome_ai_new")
+
+V23_CUSTOMERS_JSON = APP_DIR / "customer_profiles.json"
+V23_DELIVERY_WAIT_JSON = APP_DIR / "delivery_waiting.json"
+V23_DELIVERY_LOG_JSON = APP_DIR / "delivery_address_log.json"
+
+
+def v23_now():
+    return _v23_datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def v23_clean_phone(value):
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def v23_norm(text):
+    text = str(text or "").lower().strip()
+    text = text.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u").replace("ñ", "n")
+    return text
+
+
+def v23_load_json(path, default):
+    try:
+        if not path.exists():
+            return default
+        return _v23_json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return default
+
+
+def v23_save_json(path, data):
+    path.write_text(_v23_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def v23_log(item):
+    data = v23_load_json(V23_DELIVERY_LOG_JSON, [])
+    data.append(item)
+    v23_save_json(V23_DELIVERY_LOG_JSON, data[-100:])
+
+
+def v23_find_phone(obj):
+    if not isinstance(obj, dict):
+        return ""
+
+    keys = [
+        "waId", "wa_id", "from", "phone", "sender", "sourceId",
+        "whatsappNumber", "phoneNumber", "number", "mobile"
+    ]
+
+    for k in keys:
+        p = v23_clean_phone(obj.get(k))
+        if p:
+            return p
+
+    for v in obj.values():
+        if isinstance(v, dict):
+            p = v23_find_phone(v)
+            if p:
+                return p
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    p = v23_find_phone(item)
+                    if p:
+                        return p
+
+    return ""
+
+
+def v23_find_text(obj):
+    if not isinstance(obj, dict):
+        return ""
+
+    keys = ["text", "messageText", "body", "content", "caption", "msg"]
+
+    for k in keys:
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):
+            t = v23_find_text(v)
+            if t:
+                return t
+
+    v = obj.get("message")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    if isinstance(v, dict):
+        t = v23_find_text(v)
+        if t:
+            return t
+
+    for v in obj.values():
+        if isinstance(v, dict):
+            t = v23_find_text(v)
+            if t:
+                return t
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    t = v23_find_text(item)
+                    if t:
+                        return t
+
+    return ""
+
+
+def v23_is_outgoing(data):
+    if not isinstance(data, dict):
+        return False
+
+    owner = data.get("owner")
+    event_type = str(data.get("eventType", "") or "").lower()
+
+    if owner is True or str(owner).lower() == "true":
+        return True
+
+    if "sent" in event_type:
+        return True
+
+    return False
+
+
+def v23_is_admin(phone):
+    phone = v23_clean_phone(phone)
+
+    try:
+        if "is_admin" in globals() and is_admin(phone):
+            return True
+    except Exception:
+        pass
+
+    try:
+        if "ADMIN_PHONES" in globals():
+            for a in ADMIN_PHONES:
+                aa = v23_clean_phone(a)
+                if phone == aa or phone.endswith(aa) or aa.endswith(phone):
+                    return True
+    except Exception:
+        pass
+
+    return False
+
+
+def v23_is_google_maps(text):
+    low = str(text or "").lower()
+    return (
+        "google.com/maps" in low
+        or "maps.app.goo.gl" in low
+        or "goo.gl/maps" in low
+        or "waze.com" in low
+    )
+
+
+def v23_extract_coordinates(text):
+    s = str(text or "")
+    m = _v23_re.search(r"(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)", s)
+    if m:
+        return m.group(1), m.group(2)
+    return "", ""
+
+
+def v23_is_delivery_question(text):
+    low = v23_norm(text)
+
+    keys = [
+        "envio", "envío", "delivery", "entrega", "domicilio",
+        "mandan", "llevan", "hacen delivery",
+        "cuanto es el envio", "cuanto envio", "costo de envio",
+        "precio de envio", "quiero un envio", "quiero envio",
+        "para enviar", "me lo envian", "me lo envían"
+    ]
+
+    return any(v23_norm(k) in low for k in keys)
+
+
+def v23_is_address_text(text):
+    low = v23_norm(text)
+
+    if v23_is_google_maps(text):
+        return True
+
+    address_words = [
+        "calle", "avenida", "av ", "av.", "residencial", "sector",
+        "numero", "número", "num ", "no.", "casa", "apto", "apartamento",
+        "edificio", "manzana", "km ", "carretera", "frente a",
+        "al lado", "cerca de", "detras", "detrás", "entrada",
+        "santo domingo", "san isidro", "sde", "santo domingo este",
+        "los frailes", "alma rosa", "invivienda", "charles", "mendoza"
+    ]
+
+    return any(w in low for w in address_words)
+
+
+def v23_waiting_address(phone):
+    phone = v23_clean_phone(phone)
+    data = v23_load_json(V23_DELIVERY_WAIT_JSON, {})
+    return bool(data.get(phone, {}).get("waiting"))
+
+
+def v23_set_waiting_address(phone, waiting=True):
+    phone = v23_clean_phone(phone)
+    data = v23_load_json(V23_DELIVERY_WAIT_JSON, {})
+
+    if waiting:
+        data[phone] = {"waiting": True, "updated_at": v23_now()}
+    else:
+        data.pop(phone, None)
+
+    v23_save_json(V23_DELIVERY_WAIT_JSON, data)
+
+
+def v23_update_customer_address(phone, text):
+    phone = v23_clean_phone(phone)
+    profiles = v23_load_json(V23_CUSTOMERS_JSON, {})
+
+    profile = profiles.setdefault(phone, {
+        "phone": phone,
+        "name": "",
+        "address": "",
+        "zone": "",
+        "location_url": "",
+        "latitude": "",
+        "longitude": "",
+        "updated_at": v23_now()
+    })
+
+    raw = str(text or "").strip()
+    low = v23_norm(raw)
+
+    lat, lng = v23_extract_coordinates(raw)
+
+    if v23_is_google_maps(raw):
+        profile["location_url"] = raw
+
+        if lat and lng:
+            profile["latitude"] = lat
+            profile["longitude"] = lng
+
+    if v23_is_address_text(raw) and not v23_is_google_maps(raw):
+        old = profile.get("address", "")
+        if raw not in old:
+            profile["address"] = (old + " " + raw).strip()
+
+    zones = [
+        "San Isidro",
+        "Santo Domingo Este",
+        "Los Frailes",
+        "Invivienda",
+        "Alma Rosa",
+        "Mendoza",
+        "Charles de Gaulle",
+        "Villa Faro",
+        "Ensanche Ozama"
+    ]
+
+    for z in zones:
+        if v23_norm(z) in low:
+            profile["zone"] = z
+            break
+
+    profile["updated_at"] = v23_now()
+    profiles[phone] = profile
+    v23_save_json(V23_CUSTOMERS_JSON, profiles)
+
+    return profile
+
+
+def v23_clear_product_memory(phone):
+    try:
+        if "clear_product_memory" in globals():
+            clear_product_memory(phone)
+            return
+    except Exception:
+        pass
+
+    try:
+        mem_file = APP_DIR / "memory.json"
+        data = v23_load_json(mem_file, {})
+        phone = v23_clean_phone(phone)
+
+        if isinstance(data.get(phone), dict):
+            for k in [
+                "last_product", "selected_product", "last_candidates",
+                "candidates", "last_products", "awaiting_quantity"
+            ]:
+                data[phone].pop(k, None)
+
+        v23_save_json(mem_file, data)
+    except Exception:
+        pass
+
+
+def v23_delivery_question_reply(text):
+    low = v23_norm(text)
+
+    if "san isidro" in low:
+        return (
+            "Sí 😊 realizamos envío para San Isidro.\n"
+            "Por favor envíame tu dirección exacta o ubicación de Google Maps para confirmarte disponibilidad y costo de envío."
+        )
+
+    return (
+        "Sí 😊 podemos coordinar entrega según tu zona.\n"
+        "Por favor envíame tu dirección exacta o ubicación de Google Maps para confirmarte disponibilidad y costo de envío."
+    )
+
+
+def v23_address_received_reply(profile):
+    zone = profile.get("zone", "")
+    address = profile.get("address", "")
+    location_url = profile.get("location_url", "")
+
+    lines = ["Ubicación recibida ✅"]
+
+    if zone:
+        lines.append(f"Zona: {zone}")
+
+    if address:
+        lines.append(f"Dirección: {address}")
+
+    if location_url:
+        lines.append("Recibimos tu ubicación de Google Maps.")
+
+    lines.append("")
+    lines.append("Para completar la entrega, envíame tu nombre y un punto de referencia si tienes.")
+    lines.append("Te confirmaremos disponibilidad y costo de envío.")
+
+    return "\n".join(lines)
+
+
+def yome_v23_delivery_address_guard():
+    try:
+        if _v23_request.path != "/wati-webhook" or _v23_request.method != "POST":
+            return
+
+        data = _v23_request.get_json(silent=True)
+        if not isinstance(data, dict):
+            data = _v23_request.form.to_dict() if _v23_request.form else {}
+
+        if not isinstance(data, dict):
+            return
+
+        if v23_is_outgoing(data):
+            return
+
+        phone = v23_find_phone(data)
+
+        if not phone or v23_is_admin(phone):
+            return
+
+        text = v23_find_text(data)
+
+        if not text:
+            return
+
+        is_delivery = v23_is_delivery_question(text)
+        is_address = v23_is_address_text(text)
+        is_waiting = v23_waiting_address(phone)
+
+        # 地址/配送必须优先，不允许进入产品搜索或数量逻辑
+        if is_delivery or is_address or is_waiting:
+            v23_clear_product_memory(phone)
+
+            if is_delivery and not is_address:
+                v23_set_waiting_address(phone, True)
+                reply = v23_delivery_question_reply(text)
+                send_wati_text(phone, reply)
+
+                v23_log({
+                    "time": v23_now(),
+                    "phone": phone,
+                    "type": "delivery_question",
+                    "text": text,
+                    "reply": reply
+                })
+
+                return _v23_jsonify({"status": "delivery_question_sent"}), 200
+
+            profile = v23_update_customer_address(phone, text)
+            v23_set_waiting_address(phone, False)
+
+            reply = v23_address_received_reply(profile)
+            send_wati_text(phone, reply)
+
+            v23_log({
+                "time": v23_now(),
+                "phone": phone,
+                "type": "address_received",
+                "text": text,
+                "profile": profile,
+                "reply": reply
+            })
+
+            return _v23_jsonify({"status": "address_saved"}), 200
+
+    except Exception as e:
+        print("[YOME V2.3 DELIVERY] error:", e)
+
+
+try:
+    funcs = app.before_request_funcs.setdefault(None, [])
+
+    if yome_v23_delivery_address_guard in funcs:
+        funcs.remove(yome_v23_delivery_address_guard)
+
+    # 一定要第一位：地址/地图/配送优先于产品、数量
+    funcs.insert(0, yome_v23_delivery_address_guard)
+
+    print("[YOME V2.3] 地址/配送/Google Maps 优先处理已开启")
+
+except Exception as e:
+    print("[YOME V2.3] 插入失败:", e)
+
+
+@app.get("/debug/v23-delivery-log")
+def debug_v23_delivery_log():
+    return _v23_jsonify(v23_load_json(V23_DELIVERY_LOG_JSON, []))
+
+
+@app.get("/debug/customer-profiles")
+def debug_customer_profiles():
+    return _v23_jsonify(v23_load_json(V23_CUSTOMERS_JSON, {}))
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
