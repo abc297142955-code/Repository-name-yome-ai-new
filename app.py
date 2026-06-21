@@ -3099,6 +3099,321 @@ print("[YOME SAFE ADMIN V1] Safe admin center ready: /admin-center")
 
 
 
+
+
+
+
+# === YOME PRODUCT RESCUE ONLY V1 ===
+# 只做产品恢复工具，不改AI、不改产品识别、不改webhook
+import csv, json, re, shutil, time
+from pathlib import Path
+from flask import request, render_template_string
+
+YOME_RESCUE_DATA_DIR_V1 = Path("/data")
+YOME_RESCUE_LOCAL_PRODUCTS_V1 = Path("products.csv")
+YOME_RESCUE_DATA_PRODUCTS_V1 = YOME_RESCUE_DATA_DIR_V1 / "products.csv"
+YOME_RESCUE_BACKUP_DIR_V1 = YOME_RESCUE_DATA_DIR_V1 / "backups"
+
+YOME_RESCUE_HEADERS_V1 = [
+    "name", "code", "price", "mayor", "docena",
+    "category", "description", "image_url", "updated_at"
+]
+
+def yome_rescue_norm_v1(s):
+    s = str(s or "").strip().lower()
+    s = s.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u")
+    return re.sub(r"\s+", " ", s)
+
+def yome_rescue_count_v1(path):
+    try:
+        path = Path(path)
+        if not path.exists():
+            return 0
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            return sum(1 for _ in csv.DictReader(f))
+    except Exception:
+        return 0
+
+def yome_rescue_find_col_v1(headers, options):
+    headers = list(headers or [])
+    norm_map = {yome_rescue_norm_v1(h): h for h in headers}
+
+    for op in options:
+        n = yome_rescue_norm_v1(op)
+        if n in norm_map:
+            return norm_map[n]
+
+    for h in headers:
+        nh = yome_rescue_norm_v1(h)
+        for op in options:
+            if yome_rescue_norm_v1(op) in nh:
+                return h
+
+    return ""
+
+def yome_rescue_read_any_csv_v1(path):
+    path = Path(path)
+    if not path.exists():
+        return [], []
+
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            headers = list(reader.fieldnames or [])
+            rows = list(reader)
+            return rows, headers
+    except Exception as e:
+        print("[YOME PRODUCT RESCUE V1] read error:", path, e)
+        return [], []
+
+def yome_rescue_candidate_files_v1():
+    files = []
+
+    for p in [
+        YOME_RESCUE_DATA_PRODUCTS_V1,
+        YOME_RESCUE_LOCAL_PRODUCTS_V1
+    ]:
+        if p.exists() and p not in files:
+            files.append(p)
+
+    try:
+        for p in YOME_RESCUE_DATA_DIR_V1.glob("*products*.csv"):
+            if p.exists() and p not in files:
+                files.append(p)
+    except Exception:
+        pass
+
+    try:
+        for p in YOME_RESCUE_BACKUP_DIR_V1.glob("*products*.csv"):
+            if p.exists() and p not in files:
+                files.append(p)
+    except Exception:
+        pass
+
+    try:
+        for p in Path(".").glob("*products*.csv"):
+            if p.exists() and p not in files:
+                files.append(p)
+    except Exception:
+        pass
+
+    return files
+
+def yome_rescue_standardize_row_v1(row, headers):
+    name_col = yome_rescue_find_col_v1(headers, ["name", "nombre", "producto", "product", "title"])
+    code_col = yome_rescue_find_col_v1(headers, ["code", "codigo", "código", "sku", "cod"])
+    price_col = yome_rescue_find_col_v1(headers, ["price", "precio", "detalle", "precio_venta", "retail"])
+    mayor_col = yome_rescue_find_col_v1(headers, ["mayor", "por_mayor", "precio_mayor", "wholesale"])
+    docena_col = yome_rescue_find_col_v1(headers, ["docena", "precio_docena", "dozen"])
+    cat_col = yome_rescue_find_col_v1(headers, ["category", "categoria", "categoría"])
+    desc_col = yome_rescue_find_col_v1(headers, ["description", "descripcion", "descripción", "desc"])
+    img_col = yome_rescue_find_col_v1(headers, ["image_url", "imagen", "foto", "photo", "image"])
+    upd_col = yome_rescue_find_col_v1(headers, ["updated_at", "fecha", "time", "created_at"])
+
+    r = {h: "" for h in YOME_RESCUE_HEADERS_V1}
+    r["name"] = str(row.get(name_col, "") if name_col else row.get("name", "")).strip()
+    r["code"] = str(row.get(code_col, "") if code_col else row.get("code", "")).strip()
+    r["price"] = str(row.get(price_col, "") if price_col else row.get("price", "")).strip()
+    r["mayor"] = str(row.get(mayor_col, "") if mayor_col else row.get("mayor", "")).strip()
+    r["docena"] = str(row.get(docena_col, "") if docena_col else row.get("docena", "")).strip()
+    r["category"] = str(row.get(cat_col, "") if cat_col else row.get("category", "")).strip()
+    r["description"] = str(row.get(desc_col, "") if desc_col else row.get("description", "")).strip()
+    r["image_url"] = str(row.get(img_col, "") if img_col else row.get("image_url", "")).strip()
+    r["updated_at"] = str(row.get(upd_col, "") if upd_col else row.get("updated_at", "")).strip()
+
+    if not r["category"]:
+        r["category"] = "General"
+
+    return r
+
+def yome_rescue_product_key_v1(row):
+    code = yome_rescue_norm_v1(row.get("code", ""))
+    name = yome_rescue_norm_v1(row.get("name", ""))
+
+    if code:
+        return "code:" + code
+    if name:
+        return "name:" + name
+    return ""
+
+def yome_rescue_score_v1(row):
+    score = 0
+    for k, v in row.items():
+        if str(v or "").strip():
+            score += 1
+    if str(row.get("image_url", "")).startswith("http"):
+        score += 3
+    return score
+
+def yome_rescue_merge_rows_v1():
+    merged = {}
+    order = []
+    sources = []
+
+    for path in yome_rescue_candidate_files_v1():
+        rows, headers = yome_rescue_read_any_csv_v1(path)
+        count = len(rows)
+
+        sources.append({
+            "file": str(path),
+            "count": count
+        })
+
+        for row in rows:
+            r = yome_rescue_standardize_row_v1(row, headers)
+            key = yome_rescue_product_key_v1(r)
+
+            if not key:
+                continue
+
+            # 过滤明显错误记录
+            bad_name = yome_rescue_norm_v1(r.get("name", ""))
+            bad_code = yome_rescue_norm_v1(r.get("code", ""))
+
+            if bad_name.startswith("productos guardados") or bad_name.startswith("foto recibida"):
+                continue
+            if bad_code.startswith("actualizados") or bad_code.startswith("precio"):
+                continue
+
+            if key not in merged:
+                merged[key] = r
+                order.append(key)
+            else:
+                old = merged[key]
+
+                # 先保留资料更多的一条，再补空
+                if yome_rescue_score_v1(r) > yome_rescue_score_v1(old):
+                    base = r
+                    extra = old
+                else:
+                    base = old
+                    extra = r
+
+                for h in YOME_RESCUE_HEADERS_V1:
+                    if not base.get(h) and extra.get(h):
+                        base[h] = extra.get(h)
+
+                merged[key] = base
+
+    return [merged[k] for k in order], sources
+
+def yome_rescue_backup_current_v1():
+    try:
+        YOME_RESCUE_BACKUP_DIR_V1.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        made = []
+
+        for src, label in [
+            (YOME_RESCUE_DATA_PRODUCTS_V1, "data_before_rescue"),
+            (YOME_RESCUE_LOCAL_PRODUCTS_V1, "local_before_rescue")
+        ]:
+            if src.exists():
+                dst = YOME_RESCUE_BACKUP_DIR_V1 / f"products_{label}_{ts}.csv"
+                shutil.copy2(str(src), str(dst))
+                made.append(str(dst))
+
+        return made
+    except Exception as e:
+        print("[YOME PRODUCT RESCUE V1] backup error:", e)
+        return []
+
+def yome_rescue_write_both_v1(rows):
+    YOME_RESCUE_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+
+    for target in [YOME_RESCUE_DATA_PRODUCTS_V1, YOME_RESCUE_LOCAL_PRODUCTS_V1]:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=YOME_RESCUE_HEADERS_V1)
+            writer.writeheader()
+            for r in rows:
+                writer.writerow({h: r.get(h, "") for h in YOME_RESCUE_HEADERS_V1})
+        print("[YOME PRODUCT RESCUE V1] wrote:", target, len(rows))
+
+def yome_product_rescue_v1():
+    action = request.args.get("action", "")
+    confirm = request.args.get("confirm", "").upper() == "YES"
+
+    merged_rows, sources = yome_rescue_merge_rows_v1()
+    message = ""
+
+    if action == "merge_all" and confirm:
+        yome_rescue_backup_current_v1()
+        yome_rescue_write_both_v1(merged_rows)
+        message = f"已合并恢复产品：{len(merged_rows)} 个"
+
+    data_count = yome_rescue_count_v1(YOME_RESCUE_DATA_PRODUCTS_V1)
+    local_count = yome_rescue_count_v1(YOME_RESCUE_LOCAL_PRODUCTS_V1)
+
+    page = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>YOME Product Rescue</title>
+<style>
+body{font-family:Arial,'Microsoft YaHei',sans-serif;background:#f5f7fb;padding:24px;color:#111827;}
+.card{background:white;border-radius:16px;padding:18px;margin:14px 0;box-shadow:0 2px 10px rgba(0,0,0,.07);}
+.ok{color:#16a34a;font-weight:900;font-size:24px;}
+.warn{color:#dc2626;font-weight:900;font-size:22px;}
+.btn{display:inline-block;background:#0f6bff;color:white;text-decoration:none;padding:14px 20px;border-radius:12px;font-size:20px;font-weight:900;margin:8px 0;}
+.red{background:#dc2626;}
+pre{background:#111827;color:#e5e7eb;padding:14px;border-radius:12px;white-space:pre-wrap;}
+a{color:#0f6bff;font-weight:900;}
+</style>
+</head>
+<body>
+<h1>YOME 产品恢复工具</h1>
+
+{% if message %}
+<div class="card ok">{{message}}</div>
+{% endif %}
+
+<div class="card">
+<p><b>/data/products.csv:</b> {{data_count}} 个</p>
+<p><b>本地 products.csv:</b> {{local_count}} 个</p>
+<p><b>可以合并恢复:</b> {{merge_count}} 个</p>
+</div>
+
+<div class="card">
+<h2>一键恢复</h2>
+<p>这个操作会把 /data、旧 products.csv、备份文件里的产品合并，去重后写回 /data/products.csv 和 products.csv。</p>
+<a class="btn red" href="/product-rescue?action=merge_all&confirm=YES">确认合并恢复所有产品</a>
+</div>
+
+<div class="card">
+<p><a href="/admin-center">返回后台</a> · <a href="/product-rescue">刷新检查</a></p>
+</div>
+
+<h2>找到的产品文件</h2>
+<pre>{{sources}}</pre>
+
+<h2>合并后的前20个产品预览</h2>
+<pre>{{preview}}</pre>
+
+</body>
+</html>
+"""
+    return render_template_string(
+        page,
+        message=message,
+        data_count=data_count,
+        local_count=local_count,
+        merge_count=len(merged_rows),
+        sources=json.dumps(sources, ensure_ascii=False, indent=2),
+        preview=json.dumps(merged_rows[:20], ensure_ascii=False, indent=2)
+    )
+
+try:
+    if not any(str(rule.rule) == "/product-rescue" for rule in app.url_map.iter_rules()):
+        app.add_url_rule("/product-rescue", "yome_product_rescue_v1", yome_product_rescue_v1, methods=["GET"])
+    print("[YOME PRODUCT RESCUE V1] ready: /product-rescue")
+except Exception as e:
+    print("[YOME PRODUCT RESCUE V1] route error:", e)
+
+# === END YOME PRODUCT RESCUE ONLY V1 ===
+
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
