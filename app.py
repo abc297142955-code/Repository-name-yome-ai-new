@@ -2929,6 +2929,176 @@ def debug_customer_profiles():
     return _v23_jsonify(v23_load_json(V23_CUSTOMERS_JSON, {}))
 
 
+
+
+
+
+# === YOME SAFE ADMIN CENTER ONLY V1 ===
+# Safe admin entrance only. No AI logic. No product save logic. No webhook logic.
+import csv, time
+from pathlib import Path
+from flask import render_template_string, redirect, jsonify
+
+def yome_safe_admin_route_exists_v1(path):
+    try:
+        return any(str(rule.rule) == path for rule in app.url_map.iter_rules())
+    except Exception:
+        return False
+
+def yome_safe_admin_add_route_v1(path, endpoint, func):
+    try:
+        if not yome_safe_admin_route_exists_v1(path):
+            app.add_url_rule(path, endpoint, func, methods=["GET"])
+            print("[YOME SAFE ADMIN V1] added:", path)
+        else:
+            print("[YOME SAFE ADMIN V1] exists:", path)
+    except Exception as e:
+        print("[YOME SAFE ADMIN V1] add failed:", path, e)
+
+def yome_safe_admin_count_csv_v1(path):
+    try:
+        path = Path(path)
+        if not path.exists():
+            return 0
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            return sum(1 for _ in csv.DictReader(f))
+    except Exception:
+        return 0
+
+def yome_safe_admin_product_count_v1():
+    data_file = Path("/data/products.csv")
+    local_file = Path("products.csv")
+
+    data_count = yome_safe_admin_count_csv_v1(data_file)
+    local_count = yome_safe_admin_count_csv_v1(local_file)
+
+    return max(data_count, local_count), data_count, local_count
+
+def yome_safe_admin_center_v1():
+    routes = sorted(str(rule.rule) for rule in app.url_map.iter_rules())
+    route_set = set(routes)
+
+    total, data_count, local_count = yome_safe_admin_product_count_v1()
+
+    links = [
+        ("旧版主后台 / App", "/app", "旧版本主后台，如果存在就从这里进"),
+        ("产品后台 / Product Admin", "/product-admin", "旧版产品管理页面"),
+        ("聊天后台 / LiveChat", "/livechat", "客户聊天页面"),
+        ("客户中心 / Customer Center", "/customer-center", "客户资料和聊天记录"),
+        ("付款后台 / Payment", "/payment-dashboard", "付款截图和付款记录"),
+        ("最新产品 / Latest Products", "/latest-products", "查看最新产品"),
+        ("产品同步检查", "/product-sync-check", "如果存在，用来检查 products.csv 和 /data/products.csv"),
+        ("人工客服链接检查", "/human-support-link-check", "如果存在，用来检查人工客服链接"),
+        ("AI 检查", "/ai-check", "如果存在，用来检查 AI 开关"),
+        ("收到消息日志", "/debug/incoming-log", "如果存在，用来查看客户消息有没有进来"),
+        ("发送日志", "/debug/wati-send-log", "如果存在，用来查看 WATI 发送记录"),
+        ("路由列表", "/yome-routes", "查看当前版本所有页面"),
+        ("健康检查", "/yome-health", "检查系统是否运行"),
+    ]
+
+    page = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>YOME Safe Admin Center</title>
+<style>
+body{font-family:Arial,'Microsoft YaHei',sans-serif;background:#f5f7fb;margin:0;color:#111827;}
+.header{background:#0f6bff;color:white;padding:24px 28px;}
+.header h1{margin:0;font-size:34px;}
+.wrap{padding:24px;}
+.card{background:white;border-radius:18px;padding:18px;margin-bottom:18px;box-shadow:0 3px 12px rgba(0,0,0,.07);}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;}
+.btn{display:block;background:white;border-radius:16px;padding:18px;text-decoration:none;color:#111827;box-shadow:0 2px 10px rgba(0,0,0,.06);border:2px solid transparent;}
+.btn:hover{border-color:#0f6bff;background:#eef4ff;}
+.missing{opacity:.55;background:#f3f4f6;}
+.title{font-size:21px;font-weight:900;color:#0f6bff;}
+.missing .title{color:#6b7280;}
+.desc{font-size:14px;color:#6b7280;margin-top:6px;}
+.badge{display:inline-block;margin-top:10px;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:900;}
+.ok{background:#dcfce7;color:#166534;}
+.no{background:#fee2e2;color:#991b1b;}
+.num{font-size:34px;color:#0f6bff;font-weight:900;}
+pre{background:#111827;color:#e5e7eb;padding:14px;border-radius:12px;white-space:pre-wrap;}
+</style>
+</head>
+<body>
+<div class="header">
+<h1>YOME 安全后台入口</h1>
+<div>只做入口页面，不改 AI，不改产品保存</div>
+</div>
+
+<div class="wrap">
+<div class="card">
+<p><b>产品数量:</b> <span class="num">{{total}}</span></p>
+<p>/data/products.csv：{{data_count}} 个</p>
+<p>本地 products.csv：{{local_count}} 个</p>
+</div>
+
+<div class="grid">
+{% for name,path,desc,exists in links %}
+<a class="btn {% if not exists %}missing{% endif %}" href="{{path if exists else '#'}}">
+<div class="title">{{name}}</div>
+<div class="desc">{{desc}}</div>
+{% if exists %}
+<span class="badge ok">可以打开</span>
+{% else %}
+<span class="badge no">当前干净版没有这个页面</span>
+{% endif %}
+</a>
+{% endfor %}
+</div>
+
+<div class="card" style="margin-top:20px;">
+<h2>当前版本说明</h2>
+<p>如果某个按钮显示“当前干净版没有这个页面”，不是坏了，是旧版本本来没有这个后台。</p>
+<p>现在先用能打开的旧后台，不要再动产品保存逻辑。</p>
+</div>
+</div>
+</body>
+</html>
+"""
+    link_data = []
+    for name, path, desc in links:
+        link_data.append((name, path, desc, path in route_set))
+
+    return render_template_string(
+        page,
+        links=link_data,
+        total=total,
+        data_count=data_count,
+        local_count=local_count
+    )
+
+def yome_safe_admin_redirect_v1():
+    return redirect("/admin-center")
+
+def yome_safe_admin_health_v1():
+    total, data_count, local_count = yome_safe_admin_product_count_v1()
+    return jsonify({
+        "ok": True,
+        "message": "YOME app is running",
+        "products_total": total,
+        "products_data": data_count,
+        "products_local": local_count,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S")
+    })
+
+def yome_safe_admin_routes_v1():
+    routes = sorted(str(rule.rule) for rule in app.url_map.iter_rules())
+    return "<pre>" + "\n".join(routes) + "</pre>"
+
+yome_safe_admin_add_route_v1("/admin-center", "yome_safe_admin_center_v1", yome_safe_admin_center_v1)
+yome_safe_admin_add_route_v1("/admin", "yome_safe_admin_redirect_v1", yome_safe_admin_redirect_v1)
+yome_safe_admin_add_route_v1("/manage-clean", "yome_safe_admin_manage_redirect_v1", yome_safe_admin_redirect_v1)
+yome_safe_admin_add_route_v1("/yome-health", "yome_safe_admin_health_v1", yome_safe_admin_health_v1)
+yome_safe_admin_add_route_v1("/yome-routes", "yome_safe_admin_routes_v1", yome_safe_admin_routes_v1)
+
+print("[YOME SAFE ADMIN V1] Safe admin center ready: /admin-center")
+# === END YOME SAFE ADMIN CENTER ONLY V1 ===
+
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
