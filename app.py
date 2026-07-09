@@ -3828,6 +3828,396 @@ except Exception as e:
 
 
 
+
+
+
+
+# === YOME CUSTOMER PRICE REPLY READ ONLY V1 ===
+# 只读产品目录，给客户回复价格。不删除、不覆盖、不修改 products.csv
+import csv, json, re, time, unicodedata
+from pathlib import Path
+from flask import request, render_template_string
+
+YOME_PRICE_DATA_FILE_V1 = Path("/data/products.csv")
+YOME_PRICE_LOCAL_FILE_V1 = Path("products.csv")
+YOME_PRICE_CONTEXT_FILE_V1 = Path("/data/customer_price_context_v1.json")
+
+def yome_price_digits_v1(s):
+    return re.sub(r"[^0-9]", "", str(s or ""))
+
+def yome_price_phone_v1(phone):
+    d = yome_price_digits_v1(phone)
+    if len(d) == 10 and d[:3] in ["809", "829", "849"]:
+        return "1" + d
+    return d
+
+def yome_price_norm_v1(s):
+    s = str(s or "").lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z0-9ñ\s-]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def yome_price_admins_v1():
+    import os
+    raw = os.getenv("YOME_ADMIN_NUMBERS") or os.getenv("ADMIN_NUMBERS") or ""
+    nums = []
+    for x in re.split(r"[,;\s]+", raw):
+        d = yome_price_phone_v1(x)
+        if d:
+            nums.append(d)
+    for d in ["18293244477", "18495037888"]:
+        if d not in nums:
+            nums.append(d)
+    return nums
+
+def yome_price_is_admin_v1(phone):
+    p = yome_price_phone_v1(phone)
+    return any(p == a or p.endswith(a) or a.endswith(p) for a in yome_price_admins_v1())
+
+def yome_price_is_outgoing_v1(data):
+    txt = str(data).lower()
+    flags = [
+        "'fromme': true", '"fromme": true',
+        "'isfromme': true", '"isfromme": true',
+        "'direction': 'outbound'", '"direction": "outbound"',
+        "'status': 'sent'", '"status": "sent"',
+        "'status': 'delivered'", '"status": "delivered"',
+        "'status': 'read'", '"status": "read'",
+    ]
+    return any(x in txt for x in flags)
+
+def yome_price_extract_v1(data):
+    msg = ""
+    phone = ""
+
+    if not isinstance(data, dict):
+        return msg, phone
+
+    for k in ["text", "body", "message", "messageText", "textMessage", "caption", "content"]:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            msg = msg or v
+
+    for k in ["waId", "wa_id", "from", "sender", "whatsappNumber", "phone", "phoneNumber"]:
+        v = data.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            phone = phone or str(v)
+
+    try:
+        msgs = data.get("messages", [])
+        if msgs:
+            one = msgs[0]
+            msg = msg or one.get("body", "") or one.get("text", {}).get("body", "") or one.get("caption", "")
+            phone = phone or one.get("from", "")
+    except Exception:
+        pass
+
+    try:
+        contacts = data.get("contacts", [])
+        if contacts:
+            phone = phone or contacts[0].get("wa_id", "")
+    except Exception:
+        pass
+
+    return str(msg or "").strip(), yome_price_phone_v1(phone)
+
+def yome_price_count_csv_v1(path):
+    try:
+        if not Path(path).exists():
+            return 0
+        with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
+            return sum(1 for _ in csv.DictReader(f))
+    except Exception:
+        return 0
+
+def yome_price_best_file_v1():
+    data_count = yome_price_count_csv_v1(YOME_PRICE_DATA_FILE_V1)
+    local_count = yome_price_count_csv_v1(YOME_PRICE_LOCAL_FILE_V1)
+    if data_count >= local_count and YOME_PRICE_DATA_FILE_V1.exists():
+        return YOME_PRICE_DATA_FILE_V1
+    return YOME_PRICE_LOCAL_FILE_V1
+
+def yome_price_col_v1(headers, names):
+    norm_map = {yome_price_norm_v1(h): h for h in headers}
+    for n in names:
+        nn = yome_price_norm_v1(n)
+        if nn in norm_map:
+            return norm_map[nn]
+    for h in headers:
+        nh = yome_price_norm_v1(h)
+        for n in names:
+            if yome_price_norm_v1(n) in nh:
+                return h
+    return ""
+
+def yome_price_read_products_v1():
+    path = yome_price_best_file_v1()
+    if not path.exists():
+        return []
+
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            headers = list(reader.fieldnames or [])
+
+            name_col = yome_price_col_v1(headers, ["name", "nombre", "producto", "product", "title"])
+            code_col = yome_price_col_v1(headers, ["code", "codigo", "código", "sku", "cod"])
+            price_col = yome_price_col_v1(headers, ["price", "precio", "detalle", "precio_venta"])
+            mayor_col = yome_price_col_v1(headers, ["mayor", "por_mayor", "precio_mayor"])
+            docena_col = yome_price_col_v1(headers, ["docena", "precio_docena", "dozen"])
+            image_col = yome_price_col_v1(headers, ["image_url", "foto", "imagen", "photo", "image"])
+            desc_col = yome_price_col_v1(headers, ["description", "descripcion", "descripción", "desc"])
+
+            products = []
+            for r in reader:
+                name = str(r.get(name_col, "")).strip()
+                if not name:
+                    continue
+                products.append({
+                    "name": name,
+                    "code": str(r.get(code_col, "")).strip(),
+                    "price": str(r.get(price_col, "")).strip(),
+                    "mayor": str(r.get(mayor_col, "")).strip(),
+                    "docena": str(r.get(docena_col, "")).strip(),
+                    "image_url": str(r.get(image_col, "")).strip(),
+                    "description": str(r.get(desc_col, "")).strip(),
+                })
+            return products
+    except Exception as e:
+        print("[YOME PRICE V1] read products error:", e)
+        return []
+
+def yome_price_money_v1(v):
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    nums = re.findall(r"\d[\d,.]*", s)
+    if not nums:
+        return s
+    n = re.sub(r"[^0-9]", "", nums[-1])
+    if not n:
+        return s
+    try:
+        return "RD$" + f"{int(n):,}"
+    except Exception:
+        return "RD$" + n
+
+def yome_price_tokens_v1(s):
+    stop = {
+        "que","precio","cuanto","cuanto","cuesta","tiene","tienes","hay","de","la","el","los","las",
+        "con","para","quiero","me","das","dime","por","favor","una","uno","un","en","del","rd"
+    }
+    return [t for t in yome_price_norm_v1(s).split() if t not in stop and len(t) >= 2]
+
+def yome_price_find_matches_v1(query, limit=5):
+    products = yome_price_read_products_v1()
+    qn = yome_price_norm_v1(query)
+    qtokens = set(yome_price_tokens_v1(query))
+
+    matches = []
+
+    for p in products:
+        name = p.get("name", "")
+        code = p.get("code", "")
+        desc = p.get("description", "")
+
+        nn = yome_price_norm_v1(name)
+        cn = yome_price_norm_v1(code)
+        dn = yome_price_norm_v1(desc)
+        text = nn + " " + cn + " " + dn
+
+        score = 0
+
+        if cn and cn in qn:
+            score += 100
+
+        if nn and nn in qn:
+            score += 80
+
+        common = qtokens.intersection(set(yome_price_tokens_v1(text)))
+        score += len(common) * 12
+
+        if qtokens and len(common) == len(qtokens):
+            score += 20
+
+        if score > 0:
+            matches.append((score, p))
+
+    matches.sort(key=lambda x: x[0], reverse=True)
+
+    clean = []
+    seen = set()
+    for score, p in matches:
+        key = (p.get("code") or p.get("name")).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(p)
+        if len(clean) >= limit:
+            break
+
+    return clean
+
+def yome_price_format_product_v1(p, index=None):
+    title = p.get("name", "")
+    if index is not None:
+        out = f"{index}. {title}\n"
+    else:
+        out = f"Sí 😊 Tenemos {title}.\n"
+
+    if p.get("code"):
+        out += f"Código: {p.get('code')}\n"
+
+    if p.get("price"):
+        out += f"Precio: {yome_price_money_v1(p.get('price'))}\n"
+
+    if p.get("mayor"):
+        out += f"Por mayor: {yome_price_money_v1(p.get('mayor'))}\n"
+
+    if p.get("docena"):
+        out += f"Docena: {yome_price_money_v1(p.get('docena'))}\n"
+
+    if p.get("image_url"):
+        out += f"Foto: {p.get('image_url')}\n"
+
+    return out.strip()
+
+def yome_price_load_context_v1():
+    try:
+        if YOME_PRICE_CONTEXT_FILE_V1.exists():
+            data = json.loads(YOME_PRICE_CONTEXT_FILE_V1.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def yome_price_save_context_v1(data):
+    try:
+        YOME_PRICE_CONTEXT_FILE_V1.parent.mkdir(parents=True, exist_ok=True)
+        YOME_PRICE_CONTEXT_FILE_V1.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print("[YOME PRICE V1] context save error:", e)
+
+def yome_price_send_v1(phone, msg):
+    phone = yome_price_phone_v1(phone)
+    for fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+        try:
+            fn = globals().get(fname)
+            if fn and phone:
+                fn(phone, msg)
+                print("[YOME PRICE V1] sent price reply to", phone, "by", fname)
+                return True
+        except Exception as e:
+            print("[YOME PRICE V1] send failed:", fname, e)
+    return False
+
+def yome_price_has_price_intent_v1(msg):
+    n = yome_price_norm_v1(msg)
+    keys = ["precio", "cuanto", "cuesta", "valor", "a como", "que precio"]
+    return any(k in n for k in keys)
+
+@app.before_request
+def yome_customer_price_reply_read_only_v1_before():
+    try:
+        if request.path != "/wati-webhook" or request.method != "POST":
+            return None
+
+        data = request.get_json(silent=True) or {}
+
+        if yome_price_is_outgoing_v1(data):
+            return ("OK", 200)
+
+        msg, phone = yome_price_extract_v1(data)
+
+        if not msg or not phone:
+            return None
+
+        # 管理员上传产品不受影响
+        if yome_price_is_admin_v1(phone):
+            return None
+
+        ctx = yome_price_load_context_v1()
+        phone_key = yome_price_phone_v1(phone)
+
+        # 客户回复 1/2/3 选择产品
+        if re.fullmatch(r"\d{1,2}", msg.strip()) and phone_key in ctx:
+            opt = int(msg.strip())
+            options = ctx.get(phone_key, {}).get("options", [])
+            if 1 <= opt <= len(options):
+                p = options[opt - 1]
+                ctx[phone_key] = {"selected": p, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+                yome_price_save_context_v1(ctx)
+                reply = yome_price_format_product_v1(p) + "\n¿Cuántas deseas?"
+                yome_price_send_v1(phone, reply)
+                return ("OK", 200)
+
+        matches = yome_price_find_matches_v1(msg, limit=5)
+
+        # 客户问价格，或者消息里明显有产品匹配，就回复带价格
+        if matches and (yome_price_has_price_intent_v1(msg) or len(yome_price_tokens_v1(msg)) >= 1):
+            if len(matches) == 1:
+                p = matches[0]
+                ctx[phone_key] = {"selected": p, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+                yome_price_save_context_v1(ctx)
+                reply = yome_price_format_product_v1(p) + "\n¿Cuántas deseas?"
+            else:
+                ctx[phone_key] = {"options": matches, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+                yome_price_save_context_v1(ctx)
+                parts = ["Sí 😊 Tenemos varias opciones. Te envío algunas con precio y foto:\n"]
+                for i, p in enumerate(matches, 1):
+                    parts.append(yome_price_format_product_v1(p, i))
+                parts.append("\nResponde con el número de la opción que deseas.")
+                reply = "\n\n".join(parts)
+
+            yome_price_send_v1(phone, reply)
+            return ("OK", 200)
+
+    except Exception as e:
+        print("[YOME PRICE V1] error:", e)
+
+    return None
+
+@app.route("/price-answer-check")
+def yome_price_answer_check_v1():
+    products = yome_price_read_products_v1()
+    sample = request.args.get("q", "silla de escritorio con rueda")
+    matches = yome_price_find_matches_v1(sample, limit=5)
+
+    page = """
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>YOME Price Answer Check</title></head>
+<body style="font-family:Arial;padding:25px;">
+<h1>YOME 客服价格回复检查</h1>
+<p style="color:green;font-size:22px;font-weight:bold;">价格回复：已开启 ✅</p>
+<p>只读取产品目录，不删除、不修改产品。</p>
+<p><b>产品文件:</b> {{file}}</p>
+<p><b>产品数量:</b> {{count}}</p>
+<form>
+<input name="q" value="{{sample}}" style="font-size:18px;padding:8px;width:360px;">
+<button style="font-size:18px;padding:8px;">测试搜索</button>
+</form>
+<h2>匹配结果</h2>
+<pre>{{matches}}</pre>
+</body></html>
+"""
+    return render_template_string(
+        page,
+        file=str(yome_price_best_file_v1()),
+        count=len(products),
+        sample=sample,
+        matches=json.dumps(matches, ensure_ascii=False, indent=2)
+    )
+
+try:
+    print("[YOME PRICE V1] customer price reply enabled /price-answer-check")
+except Exception:
+    pass
+
+# === END YOME CUSTOMER PRICE REPLY READ ONLY V1 ===
+
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
