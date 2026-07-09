@@ -3414,6 +3414,420 @@ except Exception as e:
 
 
 
+
+
+
+
+# === YOME CUSTOMER CHAT RECORDS VIEWER ONLY V1 ===
+# 只记录/查看客户消息，不删除聊天，不改产品保存，不改AI逻辑
+import csv, json, re, time
+from pathlib import Path
+from flask import request, render_template_string, jsonify
+
+try:
+    YOME_CCR_DATA_DIR_V1 = Path("/data")
+    YOME_CCR_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+except Exception:
+    YOME_CCR_DATA_DIR_V1 = Path(".")
+    YOME_CCR_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+
+YOME_CCR_LOG_V1 = YOME_CCR_DATA_DIR_V1 / "customer_chat_records_v1.jsonl"
+
+def yome_ccr_digits_v1(s):
+    return re.sub(r"[^0-9]", "", str(s or ""))
+
+def yome_ccr_phone_v1(phone):
+    d = yome_ccr_digits_v1(phone)
+    if len(d) == 10 and d[:3] in ["809", "829", "849"]:
+        return "1" + d
+    return d
+
+def yome_ccr_admins_v1():
+    import os
+    raw = os.getenv("YOME_ADMIN_NUMBERS") or os.getenv("ADMIN_NUMBERS") or ""
+    nums = []
+    for x in re.split(r"[,;\s]+", raw):
+        d = yome_ccr_phone_v1(x)
+        if d:
+            nums.append(d)
+    for d in ["18293244477", "18495037888"]:
+        if d not in nums:
+            nums.append(d)
+    return nums
+
+def yome_ccr_is_admin_v1(phone):
+    p = yome_ccr_phone_v1(phone)
+    return any(p == a or p.endswith(a) or a.endswith(p) for a in yome_ccr_admins_v1())
+
+def yome_ccr_walk_strings_v1(obj):
+    arr = []
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+        elif isinstance(x, str):
+            if x.strip():
+                arr.append(x.strip())
+        elif isinstance(x, (int, float)):
+            arr.append(str(x))
+    try:
+        walk(obj)
+    except Exception:
+        pass
+    return arr
+
+def yome_ccr_is_outgoing_v1(data):
+    txt = str(data).lower()
+    flags = [
+        "'fromme': true", '"fromme": true',
+        "'isfromme': true", '"isfromme": true',
+        "'direction': 'outbound'", '"direction": "outbound"',
+        "'status': 'sent'", '"status": "sent"',
+        "'status': 'delivered'", '"status": "delivered"',
+        "'status': 'read'", '"status": "read"',
+        "'eventtype': 'message_sent'", '"eventtype": "message_sent"',
+    ]
+    return any(x in txt for x in flags)
+
+def yome_ccr_extract_v1(data):
+    msg = ""
+    phone = ""
+
+    if not isinstance(data, dict):
+        return msg, phone
+
+    for k in ["text", "body", "message", "messageText", "textMessage", "caption", "content"]:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            msg = msg or v
+
+    for k in ["waId", "wa_id", "from", "sender", "whatsappNumber", "phone", "phoneNumber"]:
+        v = data.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            phone = phone or str(v)
+
+    try:
+        msgs = data.get("messages", [])
+        if msgs:
+            one = msgs[0]
+            msg = msg or one.get("body", "") or one.get("text", {}).get("body", "") or one.get("caption", "")
+            phone = phone or one.get("from", "")
+    except Exception:
+        pass
+
+    try:
+        contacts = data.get("contacts", [])
+        if contacts:
+            phone = phone or contacts[0].get("wa_id", "")
+    except Exception:
+        pass
+
+    if not msg:
+        strings = [s for s in yome_ccr_walk_strings_v1(data) if not s.startswith("http")]
+        if strings:
+            msg = sorted(strings, key=len, reverse=True)[0]
+
+    return str(msg or "").strip(), yome_ccr_phone_v1(phone)
+
+def yome_ccr_find_urls_v1(data):
+    urls = []
+    for s in yome_ccr_walk_strings_v1(data):
+        for u in re.findall(r"https?://[^\s\"'<>]+", s):
+            u = u.strip().rstrip(".,;)")
+            if u not in urls:
+                urls.append(u)
+    return urls[:10]
+
+def yome_ccr_append_record_v1(record):
+    try:
+        YOME_CCR_LOG_V1.parent.mkdir(parents=True, exist_ok=True)
+        with YOME_CCR_LOG_V1.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print("[YOME CCR V1] append error:", e)
+
+@app.before_request
+def yome_customer_chat_records_logger_v1():
+    try:
+        if request.path != "/wati-webhook" or request.method != "POST":
+            return None
+
+        data = request.get_json(silent=True) or {}
+
+        if yome_ccr_is_outgoing_v1(data):
+            return None
+
+        msg, phone = yome_ccr_extract_v1(data)
+        urls = yome_ccr_find_urls_v1(data)
+
+        if not phone:
+            return None
+
+        # 管理员发产品不算客户聊天记录
+        if yome_ccr_is_admin_v1(phone):
+            return None
+
+        if not msg and not urls:
+            return None
+
+        record = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "phone": phone,
+            "message": msg[:3000],
+            "urls": urls,
+            "source": "wati-webhook"
+        }
+
+        yome_ccr_append_record_v1(record)
+        print("[YOME CCR V1] customer message logged:", phone, msg[:80])
+
+    except Exception as e:
+        print("[YOME CCR V1] logger error:", e)
+
+    return None
+
+def yome_ccr_read_jsonl_v1(path):
+    rows = []
+    try:
+        path = Path(path)
+        if not path.exists():
+            return rows
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        rows.append(item)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return rows
+
+def yome_ccr_read_json_file_v1(path):
+    rows = []
+    try:
+        path = Path(path)
+        if not path.exists():
+            return rows
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("records") or data.get("logs") or data.get("messages") or [data]
+        else:
+            items = []
+
+        for item in items:
+            if isinstance(item, dict):
+                msg, phone = yome_ccr_extract_v1(item)
+                urls = yome_ccr_find_urls_v1(item)
+                if msg or urls:
+                    rows.append({
+                        "time": item.get("time") or item.get("created_at") or item.get("timestamp") or "",
+                        "phone": phone or item.get("phone", ""),
+                        "message": msg[:3000],
+                        "urls": urls,
+                        "source": str(path)
+                    })
+    except Exception:
+        pass
+    return rows
+
+def yome_ccr_read_csv_file_v1(path):
+    rows = []
+    try:
+        path = Path(path)
+        if not path.exists():
+            return rows
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                phone = (
+                    r.get("phone") or r.get("waId") or r.get("wa_id") or
+                    r.get("from") or r.get("customer_phone") or ""
+                )
+                msg = (
+                    r.get("message") or r.get("text") or r.get("body") or
+                    r.get("content") or r.get("snippet") or ""
+                )
+                t = r.get("time") or r.get("created_at") or r.get("timestamp") or r.get("date") or ""
+                if not msg:
+                    msg = json.dumps(r, ensure_ascii=False)
+                rows.append({
+                    "time": t,
+                    "phone": yome_ccr_phone_v1(phone),
+                    "message": str(msg)[:3000],
+                    "urls": [],
+                    "source": str(path)
+                })
+    except Exception:
+        pass
+    return rows
+
+def yome_ccr_all_records_v1():
+    records = []
+
+    # 新记录
+    records.extend(yome_ccr_read_jsonl_v1(YOME_CCR_LOG_V1))
+
+    # 旧版本可能存在的日志文件
+    possible_json = [
+        YOME_CCR_DATA_DIR_V1 / "yome_incoming_log_v1.json",
+        Path("yome_incoming_log_v1.json"),
+        YOME_CCR_DATA_DIR_V1 / "incoming_log.json",
+        Path("incoming_log.json"),
+    ]
+
+    possible_csv = [
+        YOME_CCR_DATA_DIR_V1 / "customer_messages_big.csv",
+        Path("customer_messages_big.csv"),
+        YOME_CCR_DATA_DIR_V1 / "customer_messages.csv",
+        Path("customer_messages.csv"),
+    ]
+
+    for p in possible_json:
+        records.extend(yome_ccr_read_json_file_v1(p))
+
+    for p in possible_csv:
+        records.extend(yome_ccr_read_csv_file_v1(p))
+
+    # 去重
+    seen = set()
+    clean = []
+    for r in records:
+        phone = yome_ccr_phone_v1(r.get("phone", ""))
+        msg = str(r.get("message", "") or "")
+        t = str(r.get("time", "") or "")
+        key = phone + "|" + t + "|" + msg[:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        r["phone"] = phone
+        clean.append(r)
+
+    return clean
+
+def yome_customer_chat_records_page_v1():
+    q = str(request.args.get("q", "") or "").strip().lower()
+    phone_q = yome_ccr_digits_v1(request.args.get("phone", "") or "")
+
+    records = yome_ccr_all_records_v1()
+
+    if q:
+        records = [r for r in records if q in str(r.get("message", "")).lower() or q in str(r.get("phone", ""))]
+
+    if phone_q:
+        records = [r for r in records if yome_ccr_digits_v1(r.get("phone", "")).endswith(phone_q)]
+
+    records = list(reversed(records))[:300]
+
+    page = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>YOME 客户聊天记录</title>
+<style>
+body{font-family:Arial,'Microsoft YaHei',sans-serif;background:#f5f7fb;margin:0;color:#111827;}
+.header{background:#0f6bff;color:white;padding:22px 28px;}
+.header h1{margin:0;font-size:32px;}
+.wrap{padding:22px;}
+.card{background:white;border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.07);}
+input{font-size:18px;padding:10px;border:1px solid #d1d5db;border-radius:10px;margin:4px;}
+button{font-size:18px;background:#0f6bff;color:white;border:0;border-radius:10px;padding:11px 16px;font-weight:900;}
+.msg{background:white;border-radius:16px;padding:14px;margin:12px 0;box-shadow:0 2px 8px rgba(0,0,0,.06);}
+.phone{font-size:20px;font-weight:900;color:#0f6bff;}
+.time{color:#6b7280;font-size:14px;}
+.text{white-space:pre-wrap;font-size:17px;line-height:1.4;margin-top:8px;}
+.small{color:#6b7280;font-size:13px;margin-top:8px;}
+a{color:#0f6bff;font-weight:900;}
+</style>
+</head>
+<body>
+<div class="header">
+<h1>YOME 客户聊天记录</h1>
+<div>只查看记录，不删除聊天</div>
+</div>
+
+<div class="wrap">
+<div class="card">
+<p><b>记录数量:</b> {{count}}</p>
+<p><b>保存文件:</b> {{log_file}}</p>
+<p><a href="/admin-center">返回后台</a> · <a href="/customer-chat-records">刷新</a></p>
+<form method="get" action="/customer-chat-records">
+<input name="phone" placeholder="客户号码" value="{{phone_q}}">
+<input name="q" placeholder="搜索内容" value="{{q}}">
+<button type="submit">搜索</button>
+</form>
+</div>
+
+{% for r in records %}
+<div class="msg">
+<div class="phone">{{r.phone}}</div>
+<div class="time">{{r.time}}</div>
+<div class="text">{{r.message}}</div>
+{% if r.urls %}
+<div class="small">链接/图片：<br>
+{% for u in r.urls %}
+<a href="{{u}}">{{u}}</a><br>
+{% endfor %}
+</div>
+{% endif %}
+<div class="small">来源：{{r.source}}</div>
+</div>
+{% endfor %}
+
+{% if not records %}
+<div class="card">
+<h2>暂时没有记录</h2>
+<p>如果这里是空的，可能是干净版之前没有记录消息。让一个普通客户发一条消息测试，之后会出现在这里。</p>
+<p>WATI 自己的聊天记录还在 WATI Inbox 里。</p>
+</div>
+{% endif %}
+</div>
+</body>
+</html>
+"""
+    return render_template_string(
+        page,
+        records=records,
+        count=len(records),
+        log_file=str(YOME_CCR_LOG_V1),
+        q=q,
+        phone_q=phone_q
+    )
+
+def yome_customer_chat_records_json_v1():
+    return jsonify({
+        "count": len(yome_ccr_all_records_v1()),
+        "records": yome_ccr_all_records_v1()[-300:]
+    })
+
+try:
+    if not any(str(rule.rule) == "/customer-chat-records" for rule in app.url_map.iter_rules()):
+        app.add_url_rule("/customer-chat-records", "yome_customer_chat_records_page_v1", yome_customer_chat_records_page_v1, methods=["GET"])
+
+    if not any(str(rule.rule) == "/chat-records" for rule in app.url_map.iter_rules()):
+        app.add_url_rule("/chat-records", "yome_customer_chat_records_page_redirect_v1", yome_customer_chat_records_page_v1, methods=["GET"])
+
+    if not any(str(rule.rule) == "/customer-chat-records-json" for rule in app.url_map.iter_rules()):
+        app.add_url_rule("/customer-chat-records-json", "yome_customer_chat_records_json_v1", yome_customer_chat_records_json_v1, methods=["GET"])
+
+    print("[YOME CCR V1] 客户聊天记录页面已开启 /customer-chat-records")
+except Exception as e:
+    print("[YOME CCR V1] route error:", e)
+
+# === END YOME CUSTOMER CHAT RECORDS VIEWER ONLY V1 ===
+
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
