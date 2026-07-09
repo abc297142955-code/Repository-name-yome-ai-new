@@ -3549,6 +3549,287 @@ def yome_ccr_append_record_v1(record):
     except Exception as e:
         print("[YOME CCR V1] append error:", e)
 
+
+
+
+
+# === YOME QUOTE LOOP GUARD V1 ===
+# 防止AI把自己发出的产品报价再次当成客户消息，导致重复发送
+# 不删除产品、不删除客户聊天记录
+import json, re, time, hashlib
+from pathlib import Path
+from flask import request
+
+try:
+    YOME_QG_DATA_DIR_V1 = Path("/data")
+    YOME_QG_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+except Exception:
+    YOME_QG_DATA_DIR_V1 = Path(".")
+
+YOME_QG_STATE_V1 = YOME_QG_DATA_DIR_V1 / "quote_loop_guard_v1.json"
+
+def yome_qg_digits_v1(s):
+    return re.sub(r"[^0-9]", "", str(s or ""))
+
+def yome_qg_phone_v1(phone):
+    d = yome_qg_digits_v1(phone)
+    if len(d) == 10 and d[:3] in ["809", "829", "849"]:
+        return "1" + d
+    return d
+
+def yome_qg_load_v1():
+    try:
+        if YOME_QG_STATE_V1.exists():
+            data = json.loads(YOME_QG_STATE_V1.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("sent", {})
+                data.setdefault("blocked", [])
+                return data
+    except Exception:
+        pass
+    return {"sent": {}, "blocked": []}
+
+def yome_qg_save_v1(data):
+    try:
+        YOME_QG_STATE_V1.parent.mkdir(parents=True, exist_ok=True)
+        # 清理旧记录，只保留 1 小时内
+        now = time.time()
+        sent = data.get("sent", {})
+        data["sent"] = {k:v for k,v in sent.items() if now - float(v.get("time", 0)) < 3600}
+        data["blocked"] = data.get("blocked", [])[-100:]
+        YOME_QG_STATE_V1.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print("[YOME QUOTE GUARD V1] save error:", e)
+
+def yome_qg_walk_strings_v1(obj):
+    arr = []
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+        elif isinstance(x, str):
+            if x.strip():
+                arr.append(x.strip())
+        elif isinstance(x, (int, float)):
+            arr.append(str(x))
+    try:
+        walk(obj)
+    except Exception:
+        pass
+    return arr
+
+def yome_qg_extract_v1(data):
+    msg = ""
+    phone = ""
+
+    if not isinstance(data, dict):
+        return msg, phone
+
+    for k in ["text", "body", "message", "messageText", "textMessage", "caption", "content"]:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            msg = msg or v
+
+    for k in ["waId", "wa_id", "from", "sender", "whatsappNumber", "phone", "phoneNumber"]:
+        v = data.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            phone = phone or str(v)
+
+    try:
+        msgs = data.get("messages", [])
+        if msgs:
+            one = msgs[0]
+            msg = msg or one.get("body", "") or one.get("text", {}).get("body", "") or one.get("caption", "")
+            phone = phone or one.get("from", "")
+    except Exception:
+        pass
+
+    try:
+        contacts = data.get("contacts", [])
+        if contacts:
+            phone = phone or contacts[0].get("wa_id", "")
+    except Exception:
+        pass
+
+    # 找最长文本兜底
+    if not msg:
+        strings = [s for s in yome_qg_walk_strings_v1(data) if not s.startswith("http")]
+        if strings:
+            msg = sorted(strings, key=len, reverse=True)[0]
+
+    return str(msg or "").strip(), yome_qg_phone_v1(phone)
+
+def yome_qg_is_outgoing_v1(data):
+    txt = str(data).lower()
+    flags = [
+        "'fromme': true", '"fromme": true',
+        "'isfromme': true", '"isfromme": true',
+        "'direction': 'outbound'", '"direction": "outbound"',
+        "'status': 'sent'", '"status": "sent"',
+        "'status': 'delivered'", '"status": "delivered"',
+        "'status': 'read'", '"status": "read"',
+        "'eventtype': 'message_sent'", '"eventtype": "message_sent"',
+    ]
+    return any(x in txt for x in flags)
+
+def yome_qg_norm_v1(s):
+    s = str(s or "").lower()
+    s = s.replace("í", "i").replace("é", "e").replace("á", "a").replace("ó", "o").replace("ú", "u")
+    return re.sub(r"\s+", " ", s).strip()
+
+def yome_qg_is_bot_quote_v1(msg):
+    n = yome_qg_norm_v1(msg)
+
+    phrases = [
+        "si tenemos varias opciones",
+        "te envio algunas con precio y foto",
+        "perfecto elegiste la opcion",
+        "responde con el numero",
+        "cuantas deseas",
+        "productos guardados",
+        "foto recibida",
+        "ahora envia los datos del producto",
+    ]
+
+    if any(p in n for p in phrases):
+        return True
+
+    # 典型报价格式：有 Foto + Precio/Código，多半是AI自己发的报价
+    if ("foto:" in n or "https://res.cloudinary.com" in n) and ("precio:" in n or "codigo:" in n or "código:" in n):
+        return True
+
+    return False
+
+def yome_qg_key_v1(phone, msg):
+    phone = yome_qg_phone_v1(phone)
+    short = yome_qg_norm_v1(msg)[:1200]
+    h = hashlib.sha256(short.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return phone + "|" + h
+
+def yome_qg_recent_duplicate_v1(phone, msg, seconds=180):
+    if not phone or not msg:
+        return False
+
+    key = yome_qg_key_v1(phone, msg)
+    data = yome_qg_load_v1()
+    item = data.get("sent", {}).get(key)
+
+    if item and time.time() - float(item.get("time", 0)) < seconds:
+        data.setdefault("blocked", []).append({
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "phone": phone,
+            "reason": "duplicate_send",
+            "preview": str(msg)[:180]
+        })
+        yome_qg_save_v1(data)
+        print("[YOME QUOTE GUARD V1] duplicate blocked:", phone, str(msg)[:80])
+        return True
+
+    return False
+
+def yome_qg_mark_sent_v1(phone, msg):
+    if not phone or not msg:
+        return
+    data = yome_qg_load_v1()
+    key = yome_qg_key_v1(phone, msg)
+    data.setdefault("sent", {})[key] = {
+        "time": time.time(),
+        "phone": phone,
+        "preview": str(msg)[:180]
+    }
+    yome_qg_save_v1(data)
+
+@app.before_request
+def yome_quote_loop_guard_v1_before():
+    try:
+        if request.path != "/wati-webhook" or request.method != "POST":
+            return None
+
+        data = request.get_json(silent=True) or {}
+        msg, phone = yome_qg_extract_v1(data)
+
+        # WATI发回来的发送状态 / AI自己的报价，直接忽略，不让后面的AI逻辑再处理
+        if yome_qg_is_outgoing_v1(data) or yome_qg_is_bot_quote_v1(msg):
+            st = yome_qg_load_v1()
+            st.setdefault("blocked", []).append({
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "phone": phone,
+                "reason": "outgoing_or_bot_quote",
+                "preview": str(msg)[:180]
+            })
+            yome_qg_save_v1(st)
+            print("[YOME QUOTE GUARD V1] webhook bot/outgoing ignored:", str(msg)[:80])
+            return ("OK", 200)
+
+    except Exception as e:
+        print("[YOME QUOTE GUARD V1] before error:", e)
+
+    return None
+
+def yome_qg_wrap_send_function_v1(fname):
+    try:
+        fn = globals().get(fname)
+        if not fn or getattr(fn, "_yome_qg_wrapped_v1", False):
+            return
+
+        original_name = "__yome_qg_original_" + fname
+        globals()[original_name] = fn
+
+        def wrapped(*args, **kwargs):
+            phone = ""
+            msg = ""
+
+            if len(args) >= 1:
+                phone = args[0]
+            if len(args) >= 2:
+                msg = args[1]
+
+            phone = kwargs.get("phone") or kwargs.get("to") or kwargs.get("wa_id") or kwargs.get("waId") or phone
+            msg = kwargs.get("message") or kwargs.get("text") or kwargs.get("body") or kwargs.get("content") or msg
+
+            phone = yome_qg_phone_v1(phone)
+            msg = str(msg or "")
+
+            if yome_qg_recent_duplicate_v1(phone, msg, seconds=180):
+                return True
+
+            result = fn(*args, **kwargs)
+            yome_qg_mark_sent_v1(phone, msg)
+            return result
+
+        wrapped._yome_qg_wrapped_v1 = True
+        globals()[fname] = wrapped
+        print("[YOME QUOTE GUARD V1] wrapped send:", fname)
+
+    except Exception as e:
+        print("[YOME QUOTE GUARD V1] wrap error:", fname, e)
+
+for _fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+    yome_qg_wrap_send_function_v1(_fname)
+
+try:
+    funcs = app.before_request_funcs.get(None, [])
+    if yome_quote_loop_guard_v1_before in funcs:
+        funcs.remove(yome_quote_loop_guard_v1_before)
+    app.before_request_funcs[None] = [yome_quote_loop_guard_v1_before] + funcs
+    print("[YOME QUOTE GUARD V1] 报价防循环已开启，优先级第一")
+except Exception as e:
+    print("[YOME QUOTE GUARD V1] install order error:", e)
+
+@app.route("/quote-loop-guard-check")
+def yome_quote_loop_guard_check_v1():
+    data = yome_qg_load_v1()
+    import json
+    return "<pre>" + json.dumps(data, ensure_ascii=False, indent=2) + "</pre>"
+
+print("[YOME QUOTE GUARD V1] check page: /quote-loop-guard-check")
+# === END YOME QUOTE LOOP GUARD V1 ===
+
+
+
 @app.before_request
 def yome_customer_chat_records_logger_v1():
     try:
