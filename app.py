@@ -3882,7 +3882,7 @@ def yome_price_is_outgoing_v1(data):
         "'direction': 'outbound'", '"direction": "outbound"',
         "'status': 'sent'", '"status": "sent"',
         "'status': 'delivered'", '"status": "delivered"',
-        "'status': 'read'", '"status": "read'",
+        "'status': 'read'", '"status": "read"',
     ]
     return any(x in txt for x in flags)
 
