@@ -3559,6 +3559,605 @@ def yome_ccr_append_record_v1(record):
 
 
 
+
+
+
+
+# === YOME PRODUCT AUTO REPLY READ ONLY V2 ===
+# 客户问产品 -> 自动从产品目录读取并回复价格/图片
+# 只读 products.csv，不删除、不覆盖、不修改产品目录
+import csv, json, re, time, hashlib, unicodedata, os
+from pathlib import Path
+from flask import request, render_template_string
+
+try:
+    YOME_PAR_DATA_DIR_V2 = Path("/data")
+    YOME_PAR_DATA_DIR_V2.mkdir(parents=True, exist_ok=True)
+except Exception:
+    YOME_PAR_DATA_DIR_V2 = Path(".")
+    YOME_PAR_DATA_DIR_V2.mkdir(parents=True, exist_ok=True)
+
+YOME_PAR_DATA_PRODUCTS_V2 = YOME_PAR_DATA_DIR_V2 / "products.csv"
+YOME_PAR_LOCAL_PRODUCTS_V2 = Path("products.csv")
+YOME_PAR_STATE_V2 = YOME_PAR_DATA_DIR_V2 / "product_auto_reply_v2_state.json"
+YOME_PAR_CHAT_LOG_V2 = YOME_PAR_DATA_DIR_V2 / "customer_chat_records_v1.jsonl"
+
+YOME_PAR_PUBLIC_URL_V2 = os.getenv(
+    "YOME_PUBLIC_URL",
+    "https://repository-name-yome-ai-new-production.up.railway.app"
+).rstrip("/")
+
+YOME_PAR_SUPPORT_PHONE_V2 = re.sub(
+    r"[^0-9]",
+    "",
+    os.getenv("YOME_HUMAN_SUPPORT_PHONE", "18293244477")
+)
+
+def yome_par_digits_v2(s):
+    return re.sub(r"[^0-9]", "", str(s or ""))
+
+def yome_par_phone_v2(phone):
+    d = yome_par_digits_v2(phone)
+    if len(d) == 10 and d[:3] in ["809", "829", "849"]:
+        return "1" + d
+    return d
+
+def yome_par_norm_v2(s):
+    s = str(s or "").lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z0-9ñ\s-]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def yome_par_admins_v2():
+    raw = os.getenv("YOME_ADMIN_NUMBERS") or os.getenv("ADMIN_NUMBERS") or ""
+    nums = []
+    for x in re.split(r"[,;\s]+", raw):
+        d = yome_par_phone_v2(x)
+        if d:
+            nums.append(d)
+    for d in ["18293244477", "18495037888"]:
+        if d not in nums:
+            nums.append(d)
+    return nums
+
+def yome_par_is_admin_v2(phone):
+    p = yome_par_phone_v2(phone)
+    return any(p == a or p.endswith(a) or a.endswith(p) for a in yome_par_admins_v2())
+
+def yome_par_is_outgoing_v2(data):
+    txt = str(data).lower()
+    flags = [
+        "'fromme': true", '"fromme": true',
+        "'isfromme': true", '"isfromme": true',
+        "'direction': 'outbound'", '"direction": "outbound"',
+        "'status': 'sent'", '"status": "sent"',
+        "'status': 'delivered'", '"status": "delivered"',
+        "'status': 'read'", '"status": "read"',
+        "'eventtype': 'message_sent'", '"eventtype": "message_sent"',
+    ]
+    return any(x in txt for x in flags)
+
+def yome_par_walk_strings_v2(obj):
+    arr = []
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+        elif isinstance(x, str):
+            if x.strip():
+                arr.append(x.strip())
+        elif isinstance(x, (int, float)):
+            arr.append(str(x))
+    try:
+        walk(obj)
+    except Exception:
+        pass
+    return arr
+
+def yome_par_extract_v2(data):
+    msg = ""
+    phone = ""
+
+    if not isinstance(data, dict):
+        return msg, phone
+
+    for k in ["text", "body", "message", "messageText", "textMessage", "caption", "content"]:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            msg = msg or v
+
+    for k in ["waId", "wa_id", "from", "sender", "whatsappNumber", "phone", "phoneNumber"]:
+        v = data.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            phone = phone or str(v)
+
+    try:
+        msgs = data.get("messages", [])
+        if msgs:
+            one = msgs[0]
+            msg = msg or one.get("body", "") or one.get("text", {}).get("body", "") or one.get("caption", "")
+            phone = phone or one.get("from", "")
+    except Exception:
+        pass
+
+    try:
+        contacts = data.get("contacts", [])
+        if contacts:
+            phone = phone or contacts[0].get("wa_id", "")
+    except Exception:
+        pass
+
+    if not msg:
+        strings = [s for s in yome_par_walk_strings_v2(data) if not s.startswith("http")]
+        if strings:
+            msg = sorted(strings, key=len, reverse=True)[0]
+
+    return str(msg or "").strip(), yome_par_phone_v2(phone)
+
+def yome_par_append_chat_v2(phone, msg):
+    try:
+        if not phone or not msg:
+            return
+        record = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "phone": yome_par_phone_v2(phone),
+            "message": str(msg)[:3000],
+            "urls": [],
+            "source": "product_auto_reply_v2"
+        }
+        with YOME_PAR_CHAT_LOG_V2.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print("[YOME PAR V2] chat log error:", e)
+
+def yome_par_count_csv_v2(path):
+    try:
+        path = Path(path)
+        if not path.exists():
+            return 0
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            return sum(1 for _ in csv.DictReader(f))
+    except Exception:
+        return 0
+
+def yome_par_best_products_file_v2():
+    data_count = yome_par_count_csv_v2(YOME_PAR_DATA_PRODUCTS_V2)
+    local_count = yome_par_count_csv_v2(YOME_PAR_LOCAL_PRODUCTS_V2)
+    if YOME_PAR_DATA_PRODUCTS_V2.exists() and data_count >= local_count:
+        return YOME_PAR_DATA_PRODUCTS_V2
+    return YOME_PAR_LOCAL_PRODUCTS_V2
+
+def yome_par_col_v2(headers, names):
+    norm_map = {yome_par_norm_v2(h): h for h in headers}
+    for n in names:
+        nn = yome_par_norm_v2(n)
+        if nn in norm_map:
+            return norm_map[nn]
+    for h in headers:
+        nh = yome_par_norm_v2(h)
+        for n in names:
+            if yome_par_norm_v2(n) in nh:
+                return h
+    return ""
+
+def yome_par_read_products_v2():
+    path = yome_par_best_products_file_v2()
+    if not path.exists():
+        return []
+
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            headers = list(reader.fieldnames or [])
+
+            name_col = yome_par_col_v2(headers, ["name", "nombre", "producto", "product", "title"])
+            code_col = yome_par_col_v2(headers, ["code", "codigo", "código", "sku", "cod"])
+            price_col = yome_par_col_v2(headers, ["price", "precio", "detalle", "precio_venta"])
+            mayor_col = yome_par_col_v2(headers, ["mayor", "por_mayor", "precio_mayor"])
+            docena_col = yome_par_col_v2(headers, ["docena", "precio_docena", "dozen"])
+            cat_col = yome_par_col_v2(headers, ["category", "categoria", "categoría"])
+            desc_col = yome_par_col_v2(headers, ["description", "descripcion", "descripción", "desc"])
+            img_col = yome_par_col_v2(headers, ["image_url", "foto", "imagen", "photo", "image"])
+
+            products = []
+            for r in reader:
+                name = str(r.get(name_col, "")).strip()
+                if not name:
+                    continue
+
+                # 过滤之前错误保存的系统回复
+                bad_name = yome_par_norm_v2(name)
+                bad_code = yome_par_norm_v2(r.get(code_col, ""))
+                if bad_name.startswith("productos guardados") or bad_name.startswith("foto recibida"):
+                    continue
+                if bad_code.startswith("actualizados") or bad_code.startswith("precio"):
+                    continue
+
+                products.append({
+                    "name": name,
+                    "code": str(r.get(code_col, "")).strip(),
+                    "price": str(r.get(price_col, "")).strip(),
+                    "mayor": str(r.get(mayor_col, "")).strip(),
+                    "docena": str(r.get(docena_col, "")).strip(),
+                    "category": str(r.get(cat_col, "")).strip(),
+                    "description": str(r.get(desc_col, "")).strip(),
+                    "image_url": str(r.get(img_col, "")).strip(),
+                })
+            return products
+    except Exception as e:
+        print("[YOME PAR V2] read products error:", e)
+        return []
+
+def yome_par_money_v2(v):
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    nums = re.findall(r"\d[\d,.]*", s)
+    if not nums:
+        return s
+    n = re.sub(r"[^0-9]", "", nums[-1])
+    if not n:
+        return s
+    try:
+        return "RD$" + f"{int(n):,}"
+    except Exception:
+        return "RD$" + n
+
+def yome_par_tokens_v2(s):
+    stop = {
+        "que","precio","cuanto","cuesta","cual","valor","tiene","tienes","hay",
+        "de","la","el","los","las","con","para","quiero","me","das","dime",
+        "por","favor","una","uno","un","en","del","rd","foto","fotos",
+        "opcion","opción","numero","número","disponible","disponibles"
+    }
+    return [t for t in yome_par_norm_v2(s).split() if t not in stop and len(t) >= 2]
+
+def yome_par_load_state_v2():
+    try:
+        if YOME_PAR_STATE_V2.exists():
+            data = json.loads(YOME_PAR_STATE_V2.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("enabled", True)
+                data.setdefault("context", {})
+                data.setdefault("last", {})
+                data.setdefault("logs", [])
+                return data
+    except Exception:
+        pass
+    return {"enabled": True, "context": {}, "last": {}, "logs": []}
+
+def yome_par_save_state_v2(data):
+    try:
+        now = time.time()
+        data["last"] = {k:v for k,v in data.get("last", {}).items() if now - float(v.get("time", 0)) < 3600}
+        data["logs"] = data.get("logs", [])[-150:]
+        YOME_PAR_STATE_V2.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print("[YOME PAR V2] save state error:", e)
+
+def yome_par_find_matches_v2(query, limit=5):
+    products = yome_par_read_products_v2()
+    qn = yome_par_norm_v2(query)
+    qtokens = set(yome_par_tokens_v2(query))
+
+    matches = []
+    for p in products:
+        name = p.get("name", "")
+        code = p.get("code", "")
+        desc = p.get("description", "")
+        cat = p.get("category", "")
+
+        text = f"{name} {code} {desc} {cat}"
+        tn = yome_par_norm_v2(text)
+        ntokens = set(yome_par_tokens_v2(text))
+
+        score = 0
+
+        if code and yome_par_norm_v2(code) in qn:
+            score += 120
+
+        if name and yome_par_norm_v2(name) in qn:
+            score += 100
+
+        common = qtokens.intersection(ntokens)
+        score += len(common) * 18
+
+        if qtokens and len(common) == len(qtokens):
+            score += 30
+
+        if score > 0:
+            matches.append((score, p))
+
+    matches.sort(key=lambda x: x[0], reverse=True)
+
+    clean = []
+    seen = set()
+    for score, p in matches:
+        key = (p.get("code") or p.get("name")).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(p)
+        if len(clean) >= limit:
+            break
+
+    return clean
+
+def yome_par_format_product_v2(p, index=None):
+    if index is not None:
+        out = f"{index}. {p.get('name','')}\n"
+    else:
+        out = f"Sí 😊 Tenemos {p.get('name','')}.\n"
+
+    if p.get("code"):
+        out += f"Código: {p.get('code')}\n"
+    if p.get("price"):
+        out += f"Precio: {yome_par_money_v2(p.get('price'))}\n"
+    if p.get("mayor"):
+        out += f"Por mayor: {yome_par_money_v2(p.get('mayor'))}\n"
+    if p.get("docena"):
+        out += f"Docena: {yome_par_money_v2(p.get('docena'))}\n"
+    if p.get("image_url"):
+        out += f"Foto: {p.get('image_url')}\n"
+
+    return out.strip()
+
+def yome_par_catalog_link_v2():
+    return YOME_PAR_PUBLIC_URL_V2 + "/products-view"
+
+def yome_par_support_link_v2():
+    phone = yome_par_phone_v2(YOME_PAR_SUPPORT_PHONE_V2) or "18293244477"
+    return f"https://wa.me/{phone}?text=Hola%2C%20quiero%20hablar%20con%20un%20asesor%20de%20YOME"
+
+def yome_par_human_intent_v2(msg):
+    n = yome_par_norm_v2(msg)
+    keys = [
+        "asesor","humano","agente","representante","persona",
+        "servicio al cliente","soporte","no quiero hablar con ai",
+        "no quiero hablar con ia","人工","客服","真人"
+    ]
+    return any(k in n or k in str(msg) for k in keys)
+
+def yome_par_bot_quote_v2(msg):
+    n = yome_par_norm_v2(msg)
+    if "si tenemos varias opciones" in n and "te envio algunas con precio" in n:
+        return True
+    if "perfecto elegiste la opcion" in n:
+        return True
+    if "responde con el numero" in n:
+        return True
+    if ("foto:" in n or "https://res.cloudinary.com" in n) and ("precio:" in n or "codigo:" in n or "código:" in n):
+        return True
+    return False
+
+def yome_par_recent_duplicate_v2(phone, incoming, reply, seconds=90):
+    state = yome_par_load_state_v2()
+    key_raw = yome_par_phone_v2(phone) + "|" + yome_par_norm_v2(incoming)[:300] + "|" + yome_par_norm_v2(reply)[:300]
+    key = hashlib.sha256(key_raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+    item = state.get("last", {}).get(key)
+    if item and time.time() - float(item.get("time", 0)) < seconds:
+        return True
+
+    state.setdefault("last", {})[key] = {
+        "time": time.time(),
+        "phone": yome_par_phone_v2(phone),
+        "incoming": str(incoming)[:150],
+        "reply": str(reply)[:150]
+    }
+    yome_par_save_state_v2(state)
+    return False
+
+def yome_par_send_v2(phone, msg):
+    phone = yome_par_phone_v2(phone)
+    if not phone:
+        return False
+
+    for fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+        try:
+            fn = globals().get(fname)
+            if fn:
+                fn(phone, msg)
+                print("[YOME PAR V2] sent by", fname, "to", phone)
+                return True
+        except Exception as e:
+            print("[YOME PAR V2] send failed:", fname, e)
+
+    print("[YOME PAR V2] no send function found")
+    return False
+
+def yome_par_make_reply_v2(phone, msg):
+    state = yome_par_load_state_v2()
+    phone_key = yome_par_phone_v2(phone)
+
+    if yome_par_human_intent_v2(msg):
+        return (
+            "Claro 😊 Si prefieres hablar con un asesor de YOME, puedes escribir directamente aquí:\n\n"
+            + yome_par_support_link_v2()
+        )
+
+    # 客户回复 1/2/3 选择产品
+    if re.fullmatch(r"\d{1,2}", str(msg).strip()):
+        options = state.get("context", {}).get(phone_key, {}).get("options", [])
+        idx = int(str(msg).strip())
+        if 1 <= idx <= len(options):
+            p = options[idx - 1]
+            state.setdefault("context", {})[phone_key] = {
+                "selected": p,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            yome_par_save_state_v2(state)
+            return yome_par_format_product_v2(p) + "\n¿Cuántas deseas?"
+
+    matches = yome_par_find_matches_v2(msg, limit=5)
+
+    if matches:
+        if len(matches) == 1:
+            p = matches[0]
+            state.setdefault("context", {})[phone_key] = {
+                "selected": p,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            yome_par_save_state_v2(state)
+            return yome_par_format_product_v2(p) + "\n¿Cuántas deseas?"
+
+        state.setdefault("context", {})[phone_key] = {
+            "options": matches,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        yome_par_save_state_v2(state)
+
+        parts = ["Sí 😊 Tenemos varias opciones. Te envío algunas con precio y foto:\n"]
+        for i, p in enumerate(matches, 1):
+            parts.append(yome_par_format_product_v2(p, i))
+        parts.append("\nResponde con el número de la opción que deseas.")
+        return "\n\n".join(parts)
+
+    # 没匹配到产品，给目录和人工链接
+    n = yome_par_norm_v2(msg)
+    if any(k in n for k in ["hola", "buenas", "producto", "precio", "tiene", "tienes", "catalogo", "catálogo"]):
+        return (
+            "Hola 😊 Gracias por escribir a YOME.\n\n"
+            "Puedes ver nuestros productos con fotos y precios aquí:\n"
+            + yome_par_catalog_link_v2()
+            + "\n\nSi necesitas ayuda de un asesor:\n"
+            + yome_par_support_link_v2()
+        )
+
+    return ""
+
+@app.before_request
+def yome_product_auto_reply_read_only_v2_before():
+    try:
+        if request.path != "/wati-webhook" or request.method != "POST":
+            return None
+
+        data = request.get_json(silent=True) or {}
+
+        if yome_par_is_outgoing_v2(data):
+            return ("OK", 200)
+
+        msg, phone = yome_par_extract_v2(data)
+
+        if not phone or not msg:
+            return None
+
+        # 防止系统自己的报价回流造成重复
+        if yome_par_bot_quote_v2(msg):
+            print("[YOME PAR V2] bot quote ignored")
+            return ("OK", 200)
+
+        # 管理员发产品，不影响旧版本保存产品
+        if yome_par_is_admin_v2(phone):
+            return None
+
+        # 保存客户聊天记录，不删除历史
+        yome_par_append_chat_v2(phone, msg)
+
+        state = yome_par_load_state_v2()
+        if not state.get("enabled", True):
+            return None
+
+        reply = yome_par_make_reply_v2(phone, msg)
+        if not reply:
+            return None
+
+        if yome_par_recent_duplicate_v2(phone, msg, reply, seconds=90):
+            print("[YOME PAR V2] duplicate reply skipped:", phone)
+            return ("OK", 200)
+
+        sent = yome_par_send_v2(phone, reply)
+        state = yome_par_load_state_v2()
+        state.setdefault("logs", []).append({
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "phone": yome_par_phone_v2(phone),
+            "msg": str(msg)[:160],
+            "reply": str(reply)[:160],
+            "sent": bool(sent)
+        })
+        yome_par_save_state_v2(state)
+
+        return ("OK", 200)
+
+    except Exception as e:
+        print("[YOME PAR V2] before error:", e)
+
+    return None
+
+try:
+    funcs = app.before_request_funcs.get(None, [])
+    if yome_product_auto_reply_read_only_v2_before in funcs:
+        funcs.remove(yome_product_auto_reply_read_only_v2_before)
+    app.before_request_funcs[None] = [yome_product_auto_reply_read_only_v2_before] + funcs
+    print("[YOME PAR V2] 产品自动回复已开启，优先级第一")
+except Exception as e:
+    print("[YOME PAR V2] install error:", e)
+
+@app.route("/product-auto-reply-check")
+def yome_product_auto_reply_check_v2():
+    state = yome_par_load_state_v2()
+    products = yome_par_read_products_v2()
+    q = request.args.get("q", "silla de escritorio con rueda")
+    matches = yome_par_find_matches_v2(q, limit=5)
+
+    funcs = []
+    for fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+        funcs.append({"name": fname, "exists": bool(globals().get(fname))})
+
+    page = """
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>YOME Product Auto Reply</title></head>
+<body style="font-family:Arial;padding:25px;">
+<h1>YOME 产品自动回复</h1>
+<p style="color:green;font-size:22px;font-weight:bold;">已开启 ✅</p>
+<p>只读取产品目录，不删除、不覆盖、不修改产品。</p>
+<p><b>产品文件:</b> {{file}}</p>
+<p><b>产品数量:</b> {{count}}</p>
+<p><a href="/product-auto-reply-off">关闭产品自动回复</a> · <a href="/product-auto-reply-on">打开产品自动回复</a></p>
+<form>
+<input name="q" value="{{q}}" style="font-size:18px;padding:8px;width:360px;">
+<button style="font-size:18px;padding:8px;">测试搜索</button>
+</form>
+<h2>匹配结果</h2>
+<pre>{{matches}}</pre>
+<h2>发送函数</h2>
+<pre>{{funcs}}</pre>
+<h2>最近记录</h2>
+<pre>{{logs}}</pre>
+</body></html>
+"""
+    return render_template_string(
+        page,
+        file=str(yome_par_best_products_file_v2()),
+        count=len(products),
+        q=q,
+        matches=json.dumps(matches, ensure_ascii=False, indent=2),
+        funcs=json.dumps(funcs, ensure_ascii=False, indent=2),
+        logs=json.dumps(state.get("logs", [])[-30:], ensure_ascii=False, indent=2)
+    )
+
+@app.route("/product-auto-reply-off")
+def yome_product_auto_reply_off_v2():
+    state = yome_par_load_state_v2()
+    state["enabled"] = False
+    yome_par_save_state_v2(state)
+    return "Product auto reply OFF"
+
+@app.route("/product-auto-reply-on")
+def yome_product_auto_reply_on_v2():
+    state = yome_par_load_state_v2()
+    state["enabled"] = True
+    yome_par_save_state_v2(state)
+    return "Product auto reply ON"
+
+print("[YOME PAR V2] check page: /product-auto-reply-check")
+# === END YOME PRODUCT AUTO REPLY READ ONLY V2 ===
+
+
+
 @app.before_request
 def yome_customer_chat_records_logger_v1():
     try:
