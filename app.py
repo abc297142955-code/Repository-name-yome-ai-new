@@ -4447,6 +4447,540 @@ except Exception as e:
 
 
 
+
+
+
+
+# === YOME PAYMENT SUCCESS ADMIN NOTIFY V1 ===
+# 支付/下单成功 -> 主动通知管理员
+# 不修改产品表格，不删除产品，不删除客户聊天记录
+import os, re, json, time, hashlib, unicodedata
+from pathlib import Path
+from flask import request, jsonify, render_template_string
+
+try:
+    YOME_PAY_DATA_DIR_V1 = Path("/data")
+    YOME_PAY_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+except Exception:
+    YOME_PAY_DATA_DIR_V1 = Path(".")
+    YOME_PAY_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+
+YOME_PAY_STATE_V1 = YOME_PAY_DATA_DIR_V1 / "payment_success_admin_notify_v1.json"
+YOME_PAY_NOTIFY_KEY_V1 = os.getenv("YOME_PAYMENT_NOTIFY_KEY", "YOME829PAY")
+YOME_PAY_PUBLIC_URL_V1 = os.getenv(
+    "YOME_PUBLIC_URL",
+    "https://repository-name-yome-ai-new-production.up.railway.app"
+).rstrip("/")
+
+def yome_pay_digits_v1(s):
+    return re.sub(r"[^0-9]", "", str(s or ""))
+
+def yome_pay_phone_v1(phone):
+    d = yome_pay_digits_v1(phone)
+    if len(d) == 10 and d[:3] in ["809", "829", "849"]:
+        return "1" + d
+    return d
+
+def yome_pay_norm_v1(s):
+    s = str(s or "").lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z0-9ñ\s-]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def yome_pay_admins_v1():
+    raw = (
+        os.getenv("YOME_PAYMENT_NOTIFY_ADMINS")
+        or os.getenv("YOME_ADMIN_NUMBERS")
+        or os.getenv("ADMIN_NUMBERS")
+        or ""
+    )
+    nums = []
+    for x in re.split(r"[,;\s]+", raw):
+        d = yome_pay_phone_v1(x)
+        if d:
+            nums.append(d)
+
+    for d in ["18293244477", "18495037888"]:
+        if d not in nums:
+            nums.append(d)
+
+    return nums
+
+def yome_pay_is_admin_v1(phone):
+    p = yome_pay_phone_v1(phone)
+    return any(p == a or p.endswith(a) or a.endswith(p) for a in yome_pay_admins_v1())
+
+def yome_pay_is_outgoing_v1(data):
+    txt = str(data).lower()
+    flags = [
+        "'fromme': true", '"fromme": true',
+        "'isfromme': true", '"isfromme": true',
+        "'direction': 'outbound'", '"direction": "outbound"',
+        "'status': 'sent'", '"status": "sent"',
+        "'status': 'delivered'", '"status": "delivered"',
+        "'status': 'read'", '"status": "read"',
+        "'eventtype': 'message_sent'", '"eventtype": "message_sent"',
+    ]
+    return any(x in txt for x in flags)
+
+def yome_pay_walk_v1(obj):
+    arr = []
+    def walk(x):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                arr.append((str(k), v))
+                walk(v)
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+        elif isinstance(x, str):
+            if x.strip():
+                arr.append(("", x.strip()))
+        elif isinstance(x, (int, float)):
+            arr.append(("", str(x)))
+    try:
+        walk(obj)
+    except Exception:
+        pass
+    return arr
+
+def yome_pay_find_value_v1(data, names):
+    names = [yome_pay_norm_v1(x) for x in names]
+    for k, v in yome_pay_walk_v1(data):
+        nk = yome_pay_norm_v1(k)
+        if any(n == nk or n in nk for n in names):
+            if isinstance(v, (str, int, float)):
+                return str(v)
+    return ""
+
+def yome_pay_extract_v1(data):
+    msg = ""
+    phone = ""
+
+    if not isinstance(data, dict):
+        return msg, phone
+
+    for k in ["text", "body", "message", "messageText", "textMessage", "caption", "content"]:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            msg = msg or v
+
+    for k in ["waId", "wa_id", "from", "sender", "whatsappNumber", "phone", "phoneNumber", "customerPhone"]:
+        v = data.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            phone = phone or str(v)
+
+    try:
+        msgs = data.get("messages", [])
+        if msgs:
+            one = msgs[0]
+            msg = msg or one.get("body", "") or one.get("text", {}).get("body", "") or one.get("caption", "")
+            phone = phone or one.get("from", "")
+    except Exception:
+        pass
+
+    try:
+        contacts = data.get("contacts", [])
+        if contacts:
+            phone = phone or contacts[0].get("wa_id", "")
+    except Exception:
+        pass
+
+    if not phone:
+        phone = yome_pay_find_value_v1(data, ["phone", "customer_phone", "customerPhone", "waId", "from", "sender"])
+
+    if not msg:
+        strings = []
+        for k, v in yome_pay_walk_v1(data):
+            if isinstance(v, str) and v.strip() and not v.startswith("http"):
+                strings.append(v.strip())
+        if strings:
+            msg = sorted(strings, key=len, reverse=True)[0]
+
+    return str(msg or "").strip(), yome_pay_phone_v1(phone)
+
+def yome_pay_find_urls_v1(data):
+    urls = []
+    for k, v in yome_pay_walk_v1(data):
+        if isinstance(v, str):
+            for u in re.findall(r"https?://[^\s\"'<>]+", v):
+                u = u.strip().rstrip(".,;)")
+                if u not in urls:
+                    urls.append(u)
+    return urls[:8]
+
+def yome_pay_amount_v1(data, msg=""):
+    val = yome_pay_find_value_v1(data, [
+        "amount", "total", "monto", "payment_amount", "paid_amount",
+        "order_total", "total_paid", "precio", "valor"
+    ])
+    if val:
+        return val
+
+    text = str(msg or "")
+    m = re.search(r"(?:rd\$|\$)?\s*(\d[\d,.]{2,})", text, re.I)
+    if m:
+        return m.group(1)
+
+    return ""
+
+def yome_pay_order_v1(data, msg=""):
+    val = yome_pay_find_value_v1(data, [
+        "order", "order_id", "orderId", "order_number", "pedido",
+        "invoice", "factura", "reference", "referencia", "transaction_id"
+    ])
+    if val:
+        return val
+
+    text = str(msg or "")
+    m = re.search(r"(?:orden|pedido|order|factura|ref|referencia)\s*[:#-]?\s*([A-Z0-9-]{3,})", text, re.I)
+    if m:
+        return m.group(1)
+
+    return ""
+
+def yome_pay_is_payment_success_v1(data, msg):
+    raw = str(data) + "\n" + str(msg or "")
+    n = yome_pay_norm_v1(raw)
+
+    # 不要把产品价格问题当成付款成功
+    if "que precio" in n or "cuanto cuesta" in n or "precio de" in n:
+        return False
+
+    success_keys = [
+        "payment received",
+        "payment successful",
+        "payment success",
+        "paid",
+        "pagado",
+        "pago recibido",
+        "pago exitoso",
+        "pago realizado",
+        "pago confirmado",
+        "transferencia realizada",
+        "transferencia recibida",
+        "deposito realizado",
+        "deposito recibido",
+        "comprobante de pago",
+        "recibo de pago",
+        "checkout session completed",
+        "order paid",
+        "orden pagada",
+        "pedido pagado",
+        "下单成功",
+        "付款成功",
+        "支付成功",
+        "已经付款",
+        "客人下单"
+    ]
+
+    return any(k in n for k in success_keys)
+
+def yome_pay_load_v1():
+    try:
+        if YOME_PAY_STATE_V1.exists():
+            data = json.loads(YOME_PAY_STATE_V1.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("enabled", True)
+                data.setdefault("sent", {})
+                data.setdefault("logs", [])
+                return data
+    except Exception:
+        pass
+    return {"enabled": True, "sent": {}, "logs": []}
+
+def yome_pay_save_v1(data):
+    try:
+        now = time.time()
+        data["sent"] = {
+            k: v for k, v in data.get("sent", {}).items()
+            if now - float(v.get("time", 0)) < 86400
+        }
+        data["logs"] = data.get("logs", [])[-180:]
+        YOME_PAY_STATE_V1.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print("[YOME PAY NOTIFY V1] save error:", e)
+
+def yome_pay_dedupe_key_v1(phone, amount, order, msg):
+    raw = f"{yome_pay_phone_v1(phone)}|{amount}|{order}|{str(msg)[:300]}"
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+
+def yome_pay_recent_sent_v1(phone, amount, order, msg, seconds=600):
+    state = yome_pay_load_v1()
+    key = yome_pay_dedupe_key_v1(phone, amount, order, msg)
+    item = state.get("sent", {}).get(key)
+    if item and time.time() - float(item.get("time", 0)) < seconds:
+        return True, key
+    return False, key
+
+def yome_pay_mark_sent_v1(key, info):
+    state = yome_pay_load_v1()
+    state.setdefault("sent", {})[key] = {
+        "time": time.time(),
+        "info": info
+    }
+    state.setdefault("logs", []).append({
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "info": info
+    })
+    yome_pay_save_v1(state)
+
+def yome_pay_send_v1(phone, msg):
+    phone = yome_pay_phone_v1(phone)
+    if not phone:
+        return False
+
+    for fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+        try:
+            fn = globals().get(fname)
+            if fn:
+                fn(phone, msg)
+                print("[YOME PAY NOTIFY V1] sent by", fname, "to", phone)
+                return True
+        except Exception as e:
+            print("[YOME PAY NOTIFY V1] send failed:", fname, e)
+
+    print("[YOME PAY NOTIFY V1] no send function found")
+    return False
+
+def yome_pay_admin_message_v1(customer, amount="", order="", msg="", urls=None, source=""):
+    urls = urls or []
+    customer = yome_pay_phone_v1(customer)
+
+    lines = [
+        "✅ YOME：有客人付款/下单成功",
+        "",
+        f"Cliente: {customer or 'No detectado'}",
+    ]
+
+    if amount:
+        lines.append(f"Monto: {amount}")
+
+    if order:
+        lines.append(f"Orden/Referencia: {order}")
+
+    if msg:
+        lines.append("")
+        lines.append("Mensaje/Detalle:")
+        lines.append(str(msg)[:800])
+
+    if urls:
+        lines.append("")
+        lines.append("Comprobante/links:")
+        lines.extend(urls[:5])
+
+    if customer:
+        lines.append("")
+        lines.append("Ver聊天记录:")
+        lines.append(f"{YOME_PAY_PUBLIC_URL_V1}/customer-chat-records?phone={customer}")
+
+    lines.append("")
+    lines.append("Ver后台:")
+    lines.append(f"{YOME_PAY_PUBLIC_URL_V1}/admin-center")
+
+    return "\n".join(lines)
+
+def yome_pay_notify_admins_v1(customer, amount="", order="", msg="", urls=None, source="wati"):
+    duplicate, key = yome_pay_recent_sent_v1(customer, amount, order, msg, seconds=600)
+    if duplicate:
+        print("[YOME PAY NOTIFY V1] duplicate skipped")
+        return False, "duplicate"
+
+    text = yome_pay_admin_message_v1(customer, amount, order, msg, urls or [], source)
+    ok_count = 0
+
+    for admin in yome_pay_admins_v1():
+        if yome_pay_send_v1(admin, text):
+            ok_count += 1
+
+    info = {
+        "customer": yome_pay_phone_v1(customer),
+        "amount": amount,
+        "order": order,
+        "source": source,
+        "sent_admins": ok_count,
+        "msg": str(msg)[:300]
+    }
+    yome_pay_mark_sent_v1(key, info)
+
+    return ok_count > 0, info
+
+@app.before_request
+def yome_payment_success_admin_notify_v1_before():
+    try:
+        if request.path != "/wati-webhook" or request.method != "POST":
+            return None
+
+        data = request.get_json(silent=True) or {}
+
+        if yome_pay_is_outgoing_v1(data):
+            return None
+
+        msg, phone = yome_pay_extract_v1(data)
+
+        # 管理员发产品/命令，不触发付款通知
+        if phone and yome_pay_is_admin_v1(phone):
+            return None
+
+        if not yome_pay_is_payment_success_v1(data, msg):
+            return None
+
+        amount = yome_pay_amount_v1(data, msg)
+        order = yome_pay_order_v1(data, msg)
+        urls = yome_pay_find_urls_v1(data)
+
+        yome_pay_notify_admins_v1(
+            customer=phone,
+            amount=amount,
+            order=order,
+            msg=msg,
+            urls=urls,
+            source="wati-webhook"
+        )
+
+        # 不拦截后面的系统，避免影响原本付款/聊天记录功能
+        return None
+
+    except Exception as e:
+        print("[YOME PAY NOTIFY V1] before error:", e)
+
+    return None
+
+@app.route("/payment-success-notify", methods=["GET", "POST"])
+def yome_payment_success_notify_v1():
+    key = request.args.get("key") or request.form.get("key") or ""
+    if key != YOME_PAY_NOTIFY_KEY_V1:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    data = request.get_json(silent=True) or {}
+    phone = (
+        request.args.get("phone")
+        or request.form.get("phone")
+        or data.get("phone")
+        or data.get("customer_phone")
+        or data.get("waId")
+        or ""
+    )
+    amount = (
+        request.args.get("amount")
+        or request.form.get("amount")
+        or data.get("amount")
+        or data.get("total")
+        or data.get("monto")
+        or ""
+    )
+    order = (
+        request.args.get("order")
+        or request.form.get("order")
+        or data.get("order")
+        or data.get("order_id")
+        or data.get("pedido")
+        or data.get("reference")
+        or ""
+    )
+    msg = (
+        request.args.get("msg")
+        or request.form.get("msg")
+        or data.get("message")
+        or data.get("description")
+        or "Pago confirmado desde sistema"
+    )
+
+    ok, info = yome_pay_notify_admins_v1(
+        customer=phone,
+        amount=amount,
+        order=order,
+        msg=msg,
+        urls=[],
+        source="payment-success-notify"
+    )
+
+    return jsonify({"ok": bool(ok), "info": info})
+
+@app.route("/payment-notify-check")
+def yome_payment_notify_check_v1():
+    state = yome_pay_load_v1()
+    funcs = []
+    for fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+        funcs.append({"name": fname, "exists": bool(globals().get(fname))})
+
+    test_url = (
+        YOME_PAY_PUBLIC_URL_V1
+        + "/payment-success-notify?key="
+        + YOME_PAY_NOTIFY_KEY_V1
+        + "&phone=18290000000&amount=100&order=TEST001&msg=Prueba%20de%20pago"
+    )
+
+    page = """
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>YOME Payment Notify</title></head>
+<body style="font-family:Arial;padding:25px;">
+<h1>YOME 支付成功通知管理员</h1>
+<p style="color:green;font-size:22px;font-weight:bold;">已开启 ✅</p>
+<p>不修改产品表格，不删除产品，不删除客户聊天记录。</p>
+
+<h2>管理员号码</h2>
+<pre>{{admins}}</pre>
+
+<h2>网站/支付系统可以调用这个地址</h2>
+<pre>{{callback}}</pre>
+
+<h2>测试链接</h2>
+<p><a href="{{test_url}}">{{test_url}}</a></p>
+
+<h2>发送函数</h2>
+<pre>{{funcs}}</pre>
+
+<h2>最近记录</h2>
+<pre>{{state}}</pre>
+</body></html>
+"""
+    callback = (
+        YOME_PAY_PUBLIC_URL_V1
+        + "/payment-success-notify?key="
+        + YOME_PAY_NOTIFY_KEY_V1
+        + "&phone=客户号码&amount=金额&order=订单号&msg=付款成功"
+    )
+
+    return render_template_string(
+        page,
+        admins=json.dumps(yome_pay_admins_v1(), ensure_ascii=False, indent=2),
+        callback=callback,
+        test_url=test_url,
+        funcs=json.dumps(funcs, ensure_ascii=False, indent=2),
+        state=json.dumps(state, ensure_ascii=False, indent=2)
+    )
+
+@app.route("/payment-notify-off")
+def yome_payment_notify_off_v1():
+    state = yome_pay_load_v1()
+    state["enabled"] = False
+    yome_pay_save_v1(state)
+    return "Payment notify OFF"
+
+@app.route("/payment-notify-on")
+def yome_payment_notify_on_v1():
+    state = yome_pay_load_v1()
+    state["enabled"] = True
+    yome_pay_save_v1(state)
+    return "Payment notify ON"
+
+try:
+    funcs = app.before_request_funcs.get(None, [])
+    if yome_payment_success_admin_notify_v1_before in funcs:
+        funcs.remove(yome_payment_success_admin_notify_v1_before)
+    funcs.insert(0, yome_payment_success_admin_notify_v1_before)
+    app.before_request_funcs[None] = funcs
+    print("[YOME PAY NOTIFY V1] 支付成功通知管理员已开启")
+except Exception as e:
+    print("[YOME PAY NOTIFY V1] install error:", e)
+
+print("[YOME PAY NOTIFY V1] check page: /payment-notify-check")
+# === END YOME PAYMENT SUCCESS ADMIN NOTIFY V1 ===
+
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
