@@ -5455,6 +5455,379 @@ except Exception as e:
 
 
 
+
+
+
+
+# === YOME HUMAN OPTION AND CLOUD SYNC V1 ===
+# 客户选择人工客服 + 云端资料只读下载备份
+# 不修改产品表格，不删除产品，不删除客户聊天记录
+import os, re, json, time, zipfile, unicodedata
+from pathlib import Path
+from flask import request, send_file, jsonify, render_template_string
+
+try:
+    YOME_HCS_DATA_DIR_V1 = Path("/data")
+    YOME_HCS_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+except Exception:
+    YOME_HCS_DATA_DIR_V1 = Path(".")
+    YOME_HCS_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+
+YOME_HCS_STATE_V1 = YOME_HCS_DATA_DIR_V1 / "human_option_cloud_sync_v1.json"
+YOME_HCS_BACKUP_KEY_V1 = os.getenv("YOME_CLOUD_SYNC_KEY", "YOME829SYNC")
+YOME_HCS_PUBLIC_URL_V1 = os.getenv("YOME_PUBLIC_URL", "https://repository-name-yome-ai-new-production.up.railway.app").rstrip("/")
+YOME_HCS_SUPPORT_PHONE_V1 = re.sub(r"[^0-9]", "", os.getenv("YOME_HUMAN_SUPPORT_PHONE", "18293244477"))
+
+def yome_hcs_digits_v1(s):
+    return re.sub(r"[^0-9]", "", str(s or ""))
+
+def yome_hcs_phone_v1(phone):
+    d = yome_hcs_digits_v1(phone)
+    if len(d) == 10 and d[:3] in ["809", "829", "849"]:
+        return "1" + d
+    return d
+
+def yome_hcs_norm_v1(s):
+    s = str(s or "").lower()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^a-z0-9ñ\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+def yome_hcs_admins_v1():
+    raw = os.getenv("YOME_ADMIN_NUMBERS") or os.getenv("ADMIN_NUMBERS") or ""
+    nums = []
+    for x in re.split(r"[,;\s]+", raw):
+        d = yome_hcs_phone_v1(x)
+        if d:
+            nums.append(d)
+    for d in ["18293244477", "18495037888"]:
+        if d not in nums:
+            nums.append(d)
+    return nums
+
+def yome_hcs_is_admin_v1(phone):
+    p = yome_hcs_phone_v1(phone)
+    return any(p == a or p.endswith(a) or a.endswith(p) for a in yome_hcs_admins_v1())
+
+def yome_hcs_is_outgoing_v1(data):
+    txt = str(data).lower()
+    flags = [
+        "'fromme': true", '"fromme": true',
+        "'isfromme': true", '"isfromme": true',
+        "'direction': 'outbound'", '"direction": "outbound"',
+        "'status': 'sent'", '"status": "sent"',
+        "'status': 'delivered'", '"status": "delivered"',
+        "'status': 'read'", '"status": "read"',
+        "'eventtype': 'message_sent'", '"eventtype": "message_sent"',
+    ]
+    return any(x in txt for x in flags)
+
+def yome_hcs_walk_strings_v1(obj):
+    arr = []
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+        elif isinstance(x, str):
+            if x.strip():
+                arr.append(x.strip())
+        elif isinstance(x, (int, float)):
+            arr.append(str(x))
+    try:
+        walk(obj)
+    except Exception:
+        pass
+    return arr
+
+def yome_hcs_extract_v1(data):
+    msg = ""
+    phone = ""
+
+    if not isinstance(data, dict):
+        return msg, phone
+
+    for k in ["text", "body", "message", "messageText", "textMessage", "caption", "content"]:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            msg = msg or v
+
+    for k in ["waId", "wa_id", "from", "sender", "whatsappNumber", "phone", "phoneNumber"]:
+        v = data.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            phone = phone or str(v)
+
+    try:
+        msgs = data.get("messages", [])
+        if msgs:
+            one = msgs[0]
+            msg = msg or one.get("body", "") or one.get("text", {}).get("body", "") or one.get("caption", "")
+            phone = phone or one.get("from", "")
+    except Exception:
+        pass
+
+    try:
+        contacts = data.get("contacts", [])
+        if contacts:
+            phone = phone or contacts[0].get("wa_id", "")
+    except Exception:
+        pass
+
+    if not msg:
+        strings = [s for s in yome_hcs_walk_strings_v1(data) if not s.startswith("http")]
+        if strings:
+            msg = sorted(strings, key=len, reverse=True)[0]
+
+    return str(msg or "").strip(), yome_hcs_phone_v1(phone)
+
+def yome_hcs_load_v1():
+    try:
+        if YOME_HCS_STATE_V1.exists():
+            data = json.loads(YOME_HCS_STATE_V1.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("last_human_link", {})
+                data.setdefault("logs", [])
+                return data
+    except Exception:
+        pass
+    return {"last_human_link": {}, "logs": []}
+
+def yome_hcs_save_v1(data):
+    try:
+        now = time.time()
+        data["last_human_link"] = {
+            k: v for k, v in data.get("last_human_link", {}).items()
+            if now - float(v.get("time", 0)) < 86400
+        }
+        data["logs"] = data.get("logs", [])[-150:]
+        YOME_HCS_STATE_V1.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print("[YOME HCS V1] save error:", e)
+
+def yome_hcs_support_link_v1():
+    phone = yome_hcs_phone_v1(YOME_HCS_SUPPORT_PHONE_V1) or "18293244477"
+    return f"https://wa.me/{phone}?text=Hola%2C%20quiero%20hablar%20con%20un%20asesor%20de%20YOME"
+
+def yome_hcs_wants_human_v1(msg):
+    raw = str(msg or "").strip()
+    n = yome_hcs_norm_v1(raw)
+
+    if raw == "0":
+        return True
+
+    keys = [
+        "asesor", "humano", "agente", "representante",
+        "persona", "servicio al cliente", "soporte",
+        "quiero hablar con alguien", "quiero hablar con una persona",
+        "no quiero hablar con ai", "no quiero hablar con ia",
+        "人工", "客服", "真人", "老板", "经理"
+    ]
+    return any(k in n or k in raw for k in keys)
+
+def yome_hcs_send_v1(phone, msg):
+    phone = yome_hcs_phone_v1(phone)
+    if not phone:
+        return False
+
+    for fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+        try:
+            fn = globals().get(fname)
+            if fn:
+                fn(phone, msg)
+                print("[YOME HCS V1] sent by", fname, "to", phone)
+                return True
+        except Exception as e:
+            print("[YOME HCS V1] send failed:", fname, e)
+
+    print("[YOME HCS V1] no send function found")
+    return False
+
+@app.before_request
+def yome_human_option_before_v1():
+    try:
+        if request.path != "/wati-webhook" or request.method != "POST":
+            return None
+
+        data = request.get_json(silent=True) or {}
+
+        if yome_hcs_is_outgoing_v1(data):
+            return None
+
+        msg, phone = yome_hcs_extract_v1(data)
+
+        if not msg or not phone:
+            return None
+
+        if yome_hcs_is_admin_v1(phone):
+            return None
+
+        if not yome_hcs_wants_human_v1(msg):
+            return None
+
+        state = yome_hcs_load_v1()
+        phone_key = yome_hcs_phone_v1(phone)
+        last = state.get("last_human_link", {}).get(phone_key)
+        if last and time.time() - float(last.get("time", 0)) < 180:
+            return ("OK", 200)
+
+        reply = (
+            "Claro 😊 Puedes hablar directamente con un asesor de YOME aquí:\n\n"
+            + yome_hcs_support_link_v1()
+            + "\n\nTambién puedes responder 0 cuando quieras atención humana."
+        )
+
+        sent = yome_hcs_send_v1(phone, reply)
+
+        state.setdefault("last_human_link", {})[phone_key] = {
+            "time": time.time(),
+            "msg": msg[:200],
+            "sent": bool(sent)
+        }
+        state.setdefault("logs", []).append({
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "phone": phone_key,
+            "msg": msg[:200],
+            "sent": bool(sent)
+        })
+        yome_hcs_save_v1(state)
+
+        return ("OK", 200)
+
+    except Exception as e:
+        print("[YOME HCS V1] human option error:", e)
+
+    return None
+
+try:
+    funcs = app.before_request_funcs.get(None, [])
+    if yome_human_option_before_v1 in funcs:
+        funcs.remove(yome_human_option_before_v1)
+    app.before_request_funcs[None] = [yome_human_option_before_v1] + funcs
+    print("[YOME HCS V1] 客户选择人工客服已开启")
+except Exception as e:
+    print("[YOME HCS V1] install error:", e)
+
+def yome_hcs_count_file_v1(path):
+    try:
+        p = Path(path)
+        if p.exists():
+            return p.stat().st_size
+    except Exception:
+        pass
+    return 0
+
+def yome_hcs_best_products_file_v1():
+    data = Path("/data/products.csv")
+    local = Path("products.csv")
+    if data.exists() and data.stat().st_size >= local.stat().st_size if local.exists() else data.exists():
+        return data
+    return local
+
+def yome_hcs_backup_files_v1():
+    files = []
+
+    candidates = [
+        (yome_hcs_best_products_file_v1(), "products.csv"),
+        (Path("/data/normal_chat_inbox_v1.jsonl"), "normal_chat_inbox_v1.jsonl"),
+        (Path("/data/customer_chat_records_v1.jsonl"), "customer_chat_records_v1.jsonl"),
+        (Path("/data/payment_success_admin_notify_v1.json"), "payment_success_admin_notify_v1.json"),
+        (Path("/data/product_auto_reply_v2_state.json"), "product_auto_reply_v2_state.json"),
+        (Path("/data/unanswered_to_support_v1.json"), "unanswered_to_support_v1.json"),
+    ]
+
+    for src, name in candidates:
+        try:
+            if Path(src).exists():
+                files.append((Path(src), name))
+        except Exception:
+            pass
+
+    # 最近的产品备份也带上，不删除，只读
+    try:
+        backup_dir = Path("/data/backups")
+        if backup_dir.exists():
+            backups = sorted(backup_dir.glob("*products*.csv"), key=lambda x: x.stat().st_mtime, reverse=True)[:10]
+            for b in backups:
+                files.append((b, "backups/" + b.name))
+    except Exception:
+        pass
+
+    return files
+
+@app.route("/human-service-check")
+def yome_human_service_check_v1():
+    state = yome_hcs_load_v1()
+    page = """
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>YOME Human Service</title></head>
+<body style="font-family:Arial;padding:25px;">
+<h1>YOME 人工客服选择</h1>
+<p style="color:green;font-size:22px;font-weight:bold;">已开启 ✅</p>
+<p>客户发送 0 / asesor / humano / 人工客服，会收到客服链接。</p>
+<p><b>客服链接:</b> <a href="{{link}}">{{link}}</a></p>
+<h2>最近记录</h2>
+<pre>{{state}}</pre>
+</body></html>
+"""
+    return render_template_string(page, link=yome_hcs_support_link_v1(), state=json.dumps(state, ensure_ascii=False, indent=2))
+
+@app.route("/cloud-sync-info")
+def yome_cloud_sync_info_v1():
+    key = request.args.get("key", "")
+    if key != YOME_HCS_BACKUP_KEY_V1:
+        return "Forbidden", 403
+
+    files = []
+    for src, name in yome_hcs_backup_files_v1():
+        files.append({
+            "name": name,
+            "source": str(src),
+            "size": yome_hcs_count_file_v1(src)
+        })
+
+    return jsonify({
+        "ok": True,
+        "message": "只读云端资料备份，不修改、不删除",
+        "files": files,
+        "download_zip": YOME_HCS_PUBLIC_URL_V1 + "/cloud-sync-backup.zip?key=" + YOME_HCS_BACKUP_KEY_V1
+    })
+
+@app.route("/cloud-sync-backup.zip")
+def yome_cloud_sync_backup_zip_v1():
+    key = request.args.get("key", "")
+    if key != YOME_HCS_BACKUP_KEY_V1:
+        return "Forbidden", 403
+
+    tmp = Path("/tmp/yome_cloud_sync_backup.zip")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            manifest = {
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "note": "YOME cloud backup, read only export",
+                "files": []
+            }
+
+            for src, name in yome_hcs_backup_files_v1():
+                if src.exists():
+                    z.write(str(src), arcname=name)
+                    manifest["files"].append({"name": name, "source": str(src), "size": src.stat().st_size})
+
+            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+
+        return send_file(str(tmp), mimetype="application/zip", as_attachment=True, download_name="yome_cloud_sync_backup.zip")
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+print("[YOME HCS V1] human service: /human-service-check")
+print("[YOME HCS V1] cloud sync info: /cloud-sync-info?key=YOME829SYNC")
+# === END YOME HUMAN OPTION AND CLOUD SYNC V1 ===
+
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
