@@ -4981,6 +4981,480 @@ print("[YOME PAY NOTIFY V1] check page: /payment-notify-check")
 
 
 
+
+
+
+
+# === YOME NORMAL CHAT INBOX VIEW V1 ===
+# 像正常聊天一样查看客户消息：客户左边，YOME回复右边
+# 只记录/显示聊天，不删除产品，不删除聊天记录，不影响管理员上传产品
+import os, re, json, time, html
+from pathlib import Path
+from flask import request, render_template_string, redirect
+
+try:
+    YOME_CHAT_DATA_DIR_V1 = Path("/data")
+    YOME_CHAT_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+except Exception:
+    YOME_CHAT_DATA_DIR_V1 = Path(".")
+    YOME_CHAT_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
+
+YOME_CHAT_LOG_V1 = YOME_CHAT_DATA_DIR_V1 / "normal_chat_inbox_v1.jsonl"
+YOME_OLD_CUSTOMER_LOG_V1 = YOME_CHAT_DATA_DIR_V1 / "customer_chat_records_v1.jsonl"
+
+def yome_chat_digits_v1(s):
+    return re.sub(r"[^0-9]", "", str(s or ""))
+
+def yome_chat_phone_v1(phone):
+    d = yome_chat_digits_v1(phone)
+    if len(d) == 10 and d[:3] in ["809", "829", "849"]:
+        return "1" + d
+    return d
+
+def yome_chat_admins_v1():
+    raw = os.getenv("YOME_ADMIN_NUMBERS") or os.getenv("ADMIN_NUMBERS") or ""
+    nums = []
+    for x in re.split(r"[,;\s]+", raw):
+        d = yome_chat_phone_v1(x)
+        if d:
+            nums.append(d)
+    for d in ["18293244477", "18495037888"]:
+        if d not in nums:
+            nums.append(d)
+    return nums
+
+def yome_chat_is_admin_v1(phone):
+    p = yome_chat_phone_v1(phone)
+    return any(p == a or p.endswith(a) or a.endswith(p) for a in yome_chat_admins_v1())
+
+def yome_chat_is_outgoing_event_v1(data):
+    txt = str(data).lower()
+    flags = [
+        "'fromme': true", '"fromme": true',
+        "'isfromme': true", '"isfromme": true',
+        "'direction': 'outbound'", '"direction": "outbound"',
+        "'status': 'sent'", '"status": "sent"',
+        "'status': 'delivered'", '"status": "delivered"',
+        "'status': 'read'", '"status": "read"',
+        "'eventtype': 'message_sent'", '"eventtype": "message_sent"',
+    ]
+    return any(x in txt for x in flags)
+
+def yome_chat_walk_strings_v1(obj):
+    arr = []
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for y in x:
+                walk(y)
+        elif isinstance(x, str):
+            if x.strip():
+                arr.append(x.strip())
+        elif isinstance(x, (int, float)):
+            arr.append(str(x))
+    try:
+        walk(obj)
+    except Exception:
+        pass
+    return arr
+
+def yome_chat_extract_incoming_v1(data):
+    msg = ""
+    phone = ""
+
+    if not isinstance(data, dict):
+        return msg, phone
+
+    for k in ["text", "body", "message", "messageText", "textMessage", "caption", "content"]:
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            msg = msg or v
+
+    for k in ["waId", "wa_id", "from", "sender", "whatsappNumber", "phone", "phoneNumber"]:
+        v = data.get(k)
+        if isinstance(v, (str, int)) and str(v).strip():
+            phone = phone or str(v)
+
+    try:
+        msgs = data.get("messages", [])
+        if msgs:
+            one = msgs[0]
+            msg = msg or one.get("body", "") or one.get("text", {}).get("body", "") or one.get("caption", "")
+            phone = phone or one.get("from", "")
+    except Exception:
+        pass
+
+    try:
+        contacts = data.get("contacts", [])
+        if contacts:
+            phone = phone or contacts[0].get("wa_id", "")
+    except Exception:
+        pass
+
+    if not msg:
+        strings = [s for s in yome_chat_walk_strings_v1(data) if not s.startswith("http")]
+        if strings:
+            msg = sorted(strings, key=len, reverse=True)[0]
+
+    return str(msg or "").strip(), yome_chat_phone_v1(phone)
+
+def yome_chat_find_urls_v1(data):
+    urls = []
+    for s in yome_chat_walk_strings_v1(data):
+        for u in re.findall(r"https?://[^\s\"'<>]+", s):
+            u = u.strip().rstrip(".,;)")
+            if u not in urls:
+                urls.append(u)
+    return urls[:8]
+
+def yome_chat_append_v1(phone, direction, message, source="system", urls=None):
+    try:
+        phone = yome_chat_phone_v1(phone)
+        if not phone or yome_chat_is_admin_v1(phone):
+            return
+
+        message = str(message or "").strip()
+        urls = urls or []
+
+        if not message and not urls:
+            return
+
+        record = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ts": time.time(),
+            "phone": phone,
+            "direction": direction,  # incoming / outgoing
+            "message": message[:5000],
+            "urls": urls[:8],
+            "source": source
+        }
+
+        YOME_CHAT_LOG_V1.parent.mkdir(parents=True, exist_ok=True)
+        with YOME_CHAT_LOG_V1.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    except Exception as e:
+        print("[YOME CHAT INBOX V1] append error:", e)
+
+@app.before_request
+def yome_normal_chat_inbox_log_incoming_v1():
+    try:
+        if request.path != "/wati-webhook" or request.method != "POST":
+            return None
+
+        data = request.get_json(silent=True) or {}
+
+        # 不记录WATI自己的发送状态
+        if yome_chat_is_outgoing_event_v1(data):
+            return None
+
+        msg, phone = yome_chat_extract_incoming_v1(data)
+        urls = yome_chat_find_urls_v1(data)
+
+        if not phone or yome_chat_is_admin_v1(phone):
+            return None
+
+        yome_chat_append_v1(phone, "incoming", msg, "wati_customer", urls)
+
+    except Exception as e:
+        print("[YOME CHAT INBOX V1] incoming log error:", e)
+
+    return None
+
+def yome_chat_wrap_send_v1(fname):
+    try:
+        fn = globals().get(fname)
+        if not fn or getattr(fn, "_yome_chat_wrapped_v1", False):
+            return
+
+        def wrapped(*args, **kwargs):
+            phone = ""
+            msg = ""
+
+            if len(args) >= 1:
+                phone = args[0]
+            if len(args) >= 2:
+                msg = args[1]
+
+            phone = kwargs.get("phone") or kwargs.get("to") or kwargs.get("wa_id") or kwargs.get("waId") or phone
+            msg = kwargs.get("message") or kwargs.get("text") or kwargs.get("body") or kwargs.get("content") or msg
+
+            result = fn(*args, **kwargs)
+
+            try:
+                yome_chat_append_v1(phone, "outgoing", msg, "yome_reply", [])
+            except Exception as e:
+                print("[YOME CHAT INBOX V1] outgoing log error:", e)
+
+            return result
+
+        wrapped._yome_chat_wrapped_v1 = True
+        globals()[fname] = wrapped
+        print("[YOME CHAT INBOX V1] wrapped send:", fname)
+
+    except Exception as e:
+        print("[YOME CHAT INBOX V1] wrap send error:", fname, e)
+
+for _fname in ["send_wati_text", "wati_send_text", "send_text_message", "send_message", "wati_send_message", "send_wati_message"]:
+    yome_chat_wrap_send_v1(_fname)
+
+def yome_chat_read_jsonl_v1(path):
+    rows = []
+    try:
+        path = Path(path)
+        if not path.exists():
+            return rows
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        rows.append(item)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return rows
+
+def yome_chat_all_records_v1():
+    records = []
+
+    # 新聊天记录
+    records.extend(yome_chat_read_jsonl_v1(YOME_CHAT_LOG_V1))
+
+    # 兼容旧客户记录，只作为 incoming 显示
+    old = yome_chat_read_jsonl_v1(YOME_OLD_CUSTOMER_LOG_V1)
+    for r in old:
+        phone = yome_chat_phone_v1(r.get("phone", ""))
+        if not phone or yome_chat_is_admin_v1(phone):
+            continue
+        records.append({
+            "time": r.get("time", ""),
+            "ts": r.get("ts", 0),
+            "phone": phone,
+            "direction": "incoming",
+            "message": r.get("message", ""),
+            "urls": r.get("urls", []),
+            "source": r.get("source", "old_customer_log")
+        })
+
+    # 去重
+    seen = set()
+    clean = []
+    for r in records:
+        phone = yome_chat_phone_v1(r.get("phone", ""))
+        msg = str(r.get("message", "") or "")
+        direction = r.get("direction", "")
+        t = str(r.get("time", "") or "")
+        key = phone + "|" + direction + "|" + t + "|" + msg[:160]
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if not phone or yome_chat_is_admin_v1(phone):
+            continue
+
+        r["phone"] = phone
+        r["direction"] = direction or "incoming"
+        clean.append(r)
+
+    def sort_key(x):
+        try:
+            return float(x.get("ts") or 0)
+        except Exception:
+            return 0
+
+    clean.sort(key=sort_key)
+    return clean
+
+def yome_chat_threads_v1():
+    records = yome_chat_all_records_v1()
+    threads = {}
+    for r in records:
+        phone = yome_chat_phone_v1(r.get("phone", ""))
+        if not phone:
+            continue
+        threads.setdefault(phone, []).append(r)
+
+    result = []
+    for phone, msgs in threads.items():
+        last = msgs[-1] if msgs else {}
+        unread = sum(1 for m in msgs if m.get("direction") == "incoming")
+        result.append({
+            "phone": phone,
+            "last_time": last.get("time", ""),
+            "last_message": str(last.get("message", ""))[:90],
+            "count": len(msgs),
+            "incoming_count": unread
+        })
+
+    result.sort(key=lambda x: x.get("last_time", ""), reverse=True)
+    return result, threads
+
+def yome_chat_linkify_v1(text):
+    text = html.escape(str(text or ""))
+    text = re.sub(r"(https?://[^\s<]+)", r'<a href="\1" target="_blank">\1</a>', text)
+    return text
+
+def yome_chat_inbox_page_v1():
+    q = str(request.args.get("q", "") or "").strip()
+    phone = yome_chat_phone_v1(request.args.get("phone", "") or "")
+
+    thread_list, threads = yome_chat_threads_v1()
+
+    if q:
+        ql = q.lower()
+        filtered = []
+        for t in thread_list:
+            msgs = threads.get(t["phone"], [])
+            hay = t["phone"] + " " + " ".join(str(m.get("message","")) for m in msgs[-20:])
+            if ql in hay.lower():
+                filtered.append(t)
+        thread_list = filtered
+
+    if not phone and thread_list:
+        phone = thread_list[0]["phone"]
+
+    messages = threads.get(phone, []) if phone else []
+
+    page = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>YOME Chat Inbox</title>
+<style>
+body{font-family:Arial,'Microsoft YaHei',sans-serif;background:#e5ddd5;margin:0;color:#111827;}
+.app{display:flex;height:100vh;}
+.sidebar{width:340px;background:#ffffff;border-right:1px solid #d1d5db;overflow:auto;}
+.header{background:#0f6bff;color:white;padding:16px;font-size:24px;font-weight:900;}
+.search{padding:12px;background:#f3f4f6;}
+.search input{width:92%;font-size:16px;padding:10px;border:1px solid #d1d5db;border-radius:12px;}
+.thread{display:block;padding:14px 16px;border-bottom:1px solid #f1f5f9;text-decoration:none;color:#111827;}
+.thread:hover{background:#eef4ff;}
+.thread.active{background:#dbeafe;}
+.phone{font-size:18px;font-weight:900;color:#0f6bff;}
+.last{font-size:14px;color:#6b7280;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.time{font-size:12px;color:#9ca3af;margin-top:4px;}
+.main{flex:1;display:flex;flex-direction:column;}
+.top{background:#f9fafb;padding:14px 18px;border-bottom:1px solid #d1d5db;}
+.chat{flex:1;overflow:auto;padding:18px;background:#efeae2;}
+.bubble-row{display:flex;margin:8px 0;}
+.bubble-row.incoming{justify-content:flex-start;}
+.bubble-row.outgoing{justify-content:flex-end;}
+.bubble{max-width:68%;padding:11px 13px;border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.15);white-space:pre-wrap;line-height:1.35;font-size:16px;}
+.incoming .bubble{background:white;border-top-left-radius:4px;}
+.outgoing .bubble{background:#d9fdd3;border-top-right-radius:4px;}
+.msgtime{font-size:11px;color:#6b7280;margin-top:5px;text-align:right;}
+.empty{padding:40px;text-align:center;color:#6b7280;font-size:22px;}
+a{color:#0f6bff;font-weight:700;}
+.actions{font-size:13px;margin-top:5px;}
+.actions a{margin-right:12px;}
+@media(max-width:760px){
+ .app{display:block;height:auto;}
+ .sidebar{width:100%;height:40vh;}
+ .main{height:60vh;}
+ .bubble{max-width:85%;}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="header">YOME Chat</div>
+    <div class="search">
+      <form method="get" action="/chat-inbox">
+        <input name="q" value="{{q}}" placeholder="Buscar cliente / mensaje">
+      </form>
+      <div class="actions">
+        <a href="/admin-center">Admin</a>
+        <a href="/chat-inbox">刷新</a>
+        <a href="/customer-chat-records">旧记录</a>
+      </div>
+    </div>
+
+    {% for t in thread_list %}
+    <a class="thread {% if t.phone == phone %}active{% endif %}" href="/chat-inbox?phone={{t.phone}}">
+      <div class="phone">{{t.phone}}</div>
+      <div class="last">{{t.last_message}}</div>
+      <div class="time">{{t.last_time}} · {{t.count}} mensajes</div>
+    </a>
+    {% endfor %}
+  </div>
+
+  <div class="main">
+    {% if phone %}
+      <div class="top">
+        <div class="phone">Cliente: {{phone}}</div>
+        <div class="actions">
+          <a href="https://wa.me/{{phone}}" target="_blank">Abrir WhatsApp</a>
+          <a href="/customer-chat-records?phone={{phone}}">Ver旧记录</a>
+        </div>
+      </div>
+      <div class="chat" id="chatBox">
+        {% for m in messages %}
+        <div class="bubble-row {{m.direction}}">
+          <div class="bubble">
+            {{linkify(m.message)|safe}}
+            {% if m.urls %}
+              {% for u in m.urls %}
+                <br><a href="{{u}}" target="_blank">{{u}}</a>
+              {% endfor %}
+            {% endif %}
+            <div class="msgtime">{{m.time}} · {{'Cliente' if m.direction == 'incoming' else 'YOME'}}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">暂时没有客户聊天记录。客户发消息后会显示在这里。</div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+var box = document.getElementById("chatBox");
+if (box) { box.scrollTop = box.scrollHeight; }
+</script>
+</body>
+</html>
+"""
+    return render_template_string(
+        page,
+        thread_list=thread_list,
+        threads=threads,
+        phone=phone,
+        messages=messages,
+        q=q,
+        linkify=yome_chat_linkify_v1
+    )
+
+try:
+    if not any(str(rule.rule) == "/chat-inbox" for rule in app.url_map.iter_rules()):
+        app.add_url_rule("/chat-inbox", "yome_chat_inbox_page_v1", yome_chat_inbox_page_v1, methods=["GET"])
+
+    if not any(str(rule.rule) == "/chat" for rule in app.url_map.iter_rules()):
+        app.add_url_rule("/chat", "yome_chat_redirect_v1", lambda: redirect("/chat-inbox"), methods=["GET"])
+
+    # 把聊天记录器放在最前面：只记录，不拦截
+    funcs = app.before_request_funcs.get(None, [])
+    if yome_normal_chat_inbox_log_incoming_v1 in funcs:
+        funcs.remove(yome_normal_chat_inbox_log_incoming_v1)
+    app.before_request_funcs[None] = [yome_normal_chat_inbox_log_incoming_v1] + funcs
+
+    print("[YOME CHAT INBOX V1] 正常聊天后台已开启 /chat-inbox")
+except Exception as e:
+    print("[YOME CHAT INBOX V1] route/install error:", e)
+
+# === END YOME NORMAL CHAT INBOX VIEW V1 ===
+
+
+
 if __name__ == "__main__":
     print("[YOME V2] Starting clean system on port 5000")
     print("[YOME V2] Panel: http://127.0.0.1:5000/manage")
