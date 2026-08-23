@@ -346,7 +346,7 @@ def parse_admin_product_text(text: str) -> Dict[str, str]:
             data["code"] = v
         elif k in ["precio", "detalle", "price", "零售价", "价格"]:
             data["price_retail"] = normalize_price_string(v)
-        elif k in ["mayor", "por mayor", "wholesale", "批发价"]:
+        elif k in ["mayor", "por mayor", "wholesale", "批发价", "miembro", "precio miembro", "member", "member price", "会员价"]:
             data["price_wholesale"] = normalize_price_string(v)
         elif k in ["docena", "dozen", "一打价"]:
             data["price_dozen"] = normalize_price_string(v)
@@ -363,7 +363,7 @@ def parse_admin_product_text(text: str) -> Dict[str, str]:
                 nums = re.findall(r"[\d.,]+", raw)
                 if nums:
                     data["price_retail"] = normalize_price_string(nums[-1])
-            elif low.startswith(("mayor ", "por mayor ")):
+            elif low.startswith(("mayor ", "por mayor ", "miembro ", "precio miembro ", "会员价 ")):
                 nums = re.findall(r"[\d.,]+", raw)
                 if nums:
                     data["price_wholesale"] = normalize_price_string(nums[-1])
@@ -720,11 +720,11 @@ def all_photos(product: Dict[str, str], max_count: int = 4) -> List[str]:
 def product_reply(product: Dict[str, str]) -> str:
     lines = [f"Sí 😊 Tenemos {product.get('product_name')}."]
     if product.get("price_retail"):
-        lines.append(f"Precio: RD${money(product.get('price_retail'))} c/u.")
+        lines.append(f"Precio regular: RD${money(product.get('price_retail'))} c/u.")
     if product.get("price_wholesale"):
-        lines.append(f"Por mayor desde 3 unidades: RD${money(product.get('price_wholesale'))} c/u.")
+        lines.append(f"Precio miembro: RD${money(product.get('price_wholesale'))} c/u.")
     if product.get("price_dozen"):
-        lines.append(f"Por docena desde 12 unidades: RD${money(product.get('price_dozen'))} c/u.")
+        lines.append(f"Precio docena desde 12 unidades: RD${money(product.get('price_dozen'))} c/u.")
     if product.get("code"):
         lines.append(f"Código: {product.get('code')}.")
     photos = all_photos(product)
@@ -740,11 +740,11 @@ def list_reply(products: List[Dict[str, str]], keyword: str = "producto") -> str
         lines.append("")
         lines.append(f"{i}. {p.get('product_name')}")
         if p.get("price_retail"):
-            lines.append(f"Precio: RD${money(p.get('price_retail'))}")
+            lines.append(f"Precio regular: RD${money(p.get('price_retail'))}")
         if p.get("price_wholesale"):
-            lines.append(f"Por mayor: RD${money(p.get('price_wholesale'))}")
+            lines.append(f"Precio miembro: RD${money(p.get('price_wholesale'))}")
         if p.get("price_dozen"):
-            lines.append(f"Docena: RD${money(p.get('price_dozen'))}")
+            lines.append(f"Precio docena: RD${money(p.get('price_dozen'))}")
         if p.get("code"):
             lines.append(f"Código: {p.get('code')}")
         photo = first_photo(p)
@@ -759,17 +759,17 @@ def list_reply(products: List[Dict[str, str]], keyword: str = "producto") -> str
 
 def qty_reply(product: Dict[str, str], qty: int) -> str:
     retail = parse_money(product.get("price_retail"))
-    wholesale = parse_money(product.get("price_wholesale"))
+    member = parse_money(product.get("price_wholesale"))
     dozen = parse_money(product.get("price_dozen"))
 
     unit = retail
-    rule = "precio detalle"
-    if qty >= 12 and dozen:
+    rule = "precio regular"
+    if member:
+        unit = member
+        rule = "precio miembro"
+    if qty >= 12 and dozen and (not unit or dozen <= unit):
         unit = dozen
-        rule = "precio por docena"
-    elif qty >= 3 and wholesale:
-        unit = wholesale
-        rule = "precio por mayor"
+        rule = "precio docena"
 
     lines = [product_reply(product)]
     if unit:
@@ -777,14 +777,16 @@ def qty_reply(product: Dict[str, str], qty: int) -> str:
         lines.append("")
         lines.append(f"Para {qty} unidad(es), usando {rule}: RD${money(unit)} c/u.")
         lines.append(f"Total: RD${money(total)}")
-        lines.append("¿Deseas que te lo separe?")
-        lines.append("Para completar el pedido, envíame tu nombre, zona/dirección y método de pago 😊")
+        lines.append("Puedo ayudarte a completar el pedido ahora mismo.")
+        lines.append("Envíame tu nombre, zona/dirección y método de pago 😊")
     return "\n".join(lines)
 
 
 def no_product_reply() -> str:
     return (
         "Por ahora no tengo ese producto registrado 😊\n\n"
+        "Si eres miembro de YOME, te puedo orientar con el precio miembro, pedidos y pagos desde aquí.\n"
+        "También puedes decirme: quiero hacer un pedido de RD$7800.\n\n"
         "Trabajamos muchos productos de:\n"
         "🛒 Hogar y cocina\n"
         "🎧 Electrónicos y accesorios\n"
@@ -798,6 +800,241 @@ def no_product_reply() -> str:
         "🎁 Variedades\n\n"
         "Puedes enviarme una foto, nombre o código y te ayudo a revisar."
     )
+
+
+def yome_product_name(product: Dict[str, Any] | None) -> str:
+    if not isinstance(product, dict):
+        return ""
+    return str(product.get("product_name") or product.get("name") or product.get("nombre") or "").strip()
+
+
+def yome_product_code(product: Dict[str, Any] | None) -> str:
+    if not isinstance(product, dict):
+        return ""
+    return str(product.get("code") or product.get("codigo") or product.get("sku") or "").strip()
+
+
+def yome_product_member_price(product: Dict[str, Any] | None) -> float:
+    if not isinstance(product, dict):
+        return 0
+    return parse_money(product.get("price_wholesale") or product.get("mayor"))
+
+
+def yome_product_regular_price(product: Dict[str, Any] | None) -> float:
+    if not isinstance(product, dict):
+        return 0
+    return parse_money(product.get("price_retail") or product.get("price"))
+
+
+def yome_product_dozen_price(product: Dict[str, Any] | None) -> float:
+    if not isinstance(product, dict):
+        return 0
+    return parse_money(product.get("price_dozen") or product.get("docena"))
+
+
+def yome_unit_price_for_order(product: Dict[str, Any] | None, qty: int) -> Tuple[float, str]:
+    regular = yome_product_regular_price(product)
+    member = yome_product_member_price(product)
+    dozen = yome_product_dozen_price(product)
+    unit = member or regular
+    rule = "precio miembro" if member else "precio regular"
+    if qty >= 12 and dozen and (not unit or dozen <= unit):
+        unit = dozen
+        rule = "precio docena"
+    return unit, rule
+
+
+def yome_membership_intent(text: str) -> bool:
+    low = norm(text)
+    return any(k in low for k in [
+        "miembro", "membresia", "membresía", "socio", "club", "member", "membership",
+        "precio miembro", "会员", "会员价", "会员系统", "会员价格", "优惠"
+    ])
+
+
+def yome_membership_reply() -> str:
+    return (
+        "Claro 😊 En YOME ser miembro te ayuda a comprar mejor:\n\n"
+        "✅ Ves el precio miembro de los productos\n"
+        "✅ Puedes pedir para hogar o negocio con atención más rápida\n"
+        "✅ Te ayudamos a confirmar disponibilidad, pago y entrega\n\n"
+        "En cada producto, el segundo precio es el precio miembro.\n"
+        "Para ordenar, dime el producto o el monto. Ejemplo: quiero hacer un pedido de RD$7800."
+    )
+
+
+def yome_chinese_amount(text: str) -> float:
+    s = str(text or "")
+    digits = {
+        "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+        "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+    }
+    if not any(ch in s for ch in digits) or not any(unit in s for unit in "千百十万"):
+        return 0
+    total = 0
+    section = 0
+    number = 0
+    units = {"十": 10, "百": 100, "千": 1000}
+    for ch in s:
+        if ch in digits:
+            number = digits[ch]
+        elif ch in units:
+            section += (number or 1) * units[ch]
+            number = 0
+        elif ch == "万":
+            total += (section + number) * 10000
+            section = 0
+            number = 0
+    amount = total + section + number
+    return float(amount if amount >= 100 else 0)
+
+
+def yome_extract_amount(text: str) -> float:
+    raw = str(text or "")
+    cn = yome_chinese_amount(raw)
+    if cn:
+        return cn
+    money_matches = re.findall(
+        r"(?:rd\$|\$)?\s*(\d{1,3}(?:[.,]\d{3})+|\d{4,7})(?:\s*(?:rd|dop|pesos?))?",
+        raw,
+        flags=re.I,
+    )
+    values = [parse_money(item) for item in money_matches]
+    values = [value for value in values if value >= 100]
+    return max(values) if values else 0
+
+
+def yome_order_intent(text: str) -> bool:
+    low = norm(text)
+    if any(k in low for k in [
+        "pedido", "orden", "ordenar", "comprar", "compra", "lo quiero", "separalo", "sepáralo",
+        "hacer un pedido", "quiero pedir", "quiero comprar", "下单", "订单", "购买", "订购"
+    ]):
+        return True
+    return bool(yome_extract_amount(text) and any(k in low for k in ["rd", "$", "peso", "下单", "订单", "pedido", "orden"]))
+
+
+def yome_line_value(text: str, keys: List[str]) -> str:
+    raw = str(text or "")
+    key_pattern = "|".join(re.escape(k) for k in keys)
+    match = re.search(rf"(?:{key_pattern})\s*[:：-]?\s*([^\n,;|]+)", raw, flags=re.I)
+    return match.group(1).strip() if match else ""
+
+
+def yome_extract_order_details(text: str) -> Dict[str, Any]:
+    low = norm(text)
+    details: Dict[str, Any] = {}
+    amount = yome_extract_amount(text)
+    if amount:
+        details["amount"] = amount
+    name = yome_line_value(text, ["nombre", "name", "cliente", "名字", "姓名", "联系人"])
+    if name:
+        details["customer_name"] = name
+    address = yome_line_value(text, ["direccion", "dirección", "address", "zona", "ubicacion", "ubicación", "地址", "区域"])
+    if address:
+        details["address"] = address
+    if "transferencia" in low or "deposito" in low or "depósito" in low or "banco" in low or "转账" in low:
+        details["payment_method"] = "transferencia"
+    elif "efectivo" in low or "cash" in low or "现金" in low:
+        details["payment_method"] = "efectivo"
+    elif "tarjeta" in low or "card" in low or "信用卡" in low:
+        details["payment_method"] = "tarjeta"
+    payment = yome_line_value(text, ["pago", "payment", "metodo de pago", "método de pago", "付款"])
+    if payment:
+        details["payment_method"] = payment
+    return details
+
+
+def yome_append_order_record(record: Dict[str, Any]) -> str:
+    data = load_json(ORDERS_JSON, {})
+    if isinstance(data, list):
+        data = {"orders": data}
+    if not isinstance(data, dict):
+        data = {"orders": []}
+    data.setdefault("orders", [])
+    order_id = "YOME-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4].upper()
+    record["id"] = order_id
+    record["created_at"] = now()
+    record["status"] = "pending_payment"
+    data["orders"].append(record)
+    data["orders"] = data["orders"][-300:]
+    save_json(ORDERS_JSON, data)
+    return order_id
+
+
+def yome_order_missing_fields(draft: Dict[str, Any]) -> List[str]:
+    missing = []
+    if not draft.get("amount") and not draft.get("product_name"):
+        missing.append("producto o monto")
+    if draft.get("product_name") and not draft.get("qty"):
+        missing.append("cantidad")
+    if not draft.get("customer_name"):
+        missing.append("nombre")
+    if not draft.get("address"):
+        missing.append("zona/dirección")
+    if not draft.get("payment_method"):
+        missing.append("método de pago")
+    return missing
+
+
+def yome_order_flow_reply(phone: str, text: str, product: Dict[str, Any] | None = None, qty: int = 0, amount: float = 0) -> str:
+    state = get_memory(phone)
+    draft = state.get("order_draft") if isinstance(state.get("order_draft"), dict) else {}
+    draft = dict(draft or {})
+    details = yome_extract_order_details(text)
+    if draft.get("amount") and details.get("amount") and not yome_order_intent(text):
+        details.pop("amount", None)
+    draft.update(details)
+    if product:
+        draft["product_name"] = yome_product_name(product)
+        code = yome_product_code(product)
+        if code:
+            draft["code"] = code
+        if qty:
+            unit, rule = yome_unit_price_for_order(product, qty)
+            draft["qty"] = qty
+            draft["unit_price"] = unit
+            draft["price_rule"] = rule
+            if unit:
+                draft["amount"] = qty * unit
+    if amount:
+        draft["amount"] = amount
+    draft.setdefault("source", "chat")
+    draft["phone"] = clean_phone(phone)
+    set_memory(phone, order_draft=draft)
+
+    missing = yome_order_missing_fields(draft)
+    if missing:
+        total = draft.get("amount")
+        intro = "Perfecto 😊 puedo ayudarte a completar el pedido"
+        if total:
+            intro += f" por RD${money(total)}"
+        return (
+            intro
+            + ".\n\nPara dejarlo listo, envíame lo que falta:\n"
+            + "\n".join(f"- {item}" for item in missing)
+            + "\n\nEjemplo: Nombre Juan, Dirección Santo Domingo Este, Pago transferencia."
+        )
+
+    order_id = yome_append_order_record(draft)
+    set_memory(phone, order_draft={}, last_order_id=order_id)
+    lines = [
+        f"Listo ✅ Registré tu pedido {order_id}.",
+        f"Cliente: {draft.get('customer_name')}",
+        f"Dirección/Zona: {draft.get('address')}",
+        f"Pago: {draft.get('payment_method')}",
+    ]
+    if draft.get("product_name"):
+        lines.append(f"Producto: {draft.get('product_name')}")
+    if draft.get("qty"):
+        lines.append(f"Cantidad: {draft.get('qty')}")
+    if draft.get("amount"):
+        lines.append(f"Total: RD${money(draft.get('amount'))}")
+    lines.append("")
+    lines.append(read_text_file(BANK_INFO_FILE, DEFAULT_BANK_INFO))
+    lines.append("")
+    lines.append("Cuando realices el pago, envíanos el comprobante para confirmar y preparar la entrega 😊")
+    return "\n".join(lines)
 
 
 def extract_choice_and_qty(text: str, total_options: int) -> Tuple[int, int]:
@@ -992,7 +1229,7 @@ def handle_admin(phone: str, text: str, media_urls: List[str]) -> str:
         if saved.get("price_retail"):
             lines.append(f"Precio / 零售价: RD${money(saved.get('price_retail'))}")
         if saved.get("price_wholesale"):
-            lines.append(f"Mayor / 批发价: RD${money(saved.get('price_wholesale'))}")
+            lines.append(f"Miembro / 会员价: RD${money(saved.get('price_wholesale'))}")
         if saved.get("price_dozen"):
             lines.append(f"Docena / 一打价: RD${money(saved.get('price_dozen'))}")
         if saved.get("image_urls"):
@@ -1071,6 +1308,14 @@ def handle_customer(phone: str, text: str, media_urls: List[str]) -> str:
         return "Claro 😊 Buscamos otro producto.\nEnvíame una foto, nombre o código del producto que deseas."
 
     state = get_memory(phone)
+    order_draft = state.get("order_draft") if isinstance(state.get("order_draft"), dict) else {}
+    order_amount = yome_extract_amount(text)
+    if order_draft or (order_amount and yome_order_intent(text)):
+        return yome_order_flow_reply(phone, text, amount=order_amount)
+
+    if yome_membership_intent(text) and not product_search(text, limit=1):
+        return yome_membership_reply()
+
     candidates = state.get("last_candidates")
     if isinstance(candidates, list) and candidates:
         option, qty = extract_choice_and_qty(text, len(candidates))
@@ -1078,13 +1323,13 @@ def handle_customer(phone: str, text: str, media_urls: List[str]) -> str:
             product = candidates[option - 1]
             set_memory(phone, last_product=product, selected_product=product, awaiting_quantity=not bool(qty), last_candidates=[])
             if qty:
-                return qty_reply(product, qty)
+                return qty_reply(product, qty) + "\n\n" + yome_order_flow_reply(phone, text, product=product, qty=qty)
             return f"Perfecto 😊 Elegiste la opción {option}: {product.get('product_name')}.\n" + product_reply(product)
 
     nums = [int(x) for x in re.findall(r"\b(\d{1,3})\b", norm(text))]
     last_product = state.get("last_product") or state.get("selected_product")
     if nums and isinstance(last_product, dict):
-        return qty_reply(last_product, nums[0])
+        return qty_reply(last_product, nums[0]) + "\n\n" + yome_order_flow_reply(phone, text, product=last_product, qty=nums[0])
 
     matches = product_search(text, limit=6)
     if len(matches) == 1:
@@ -1127,6 +1372,103 @@ def wati_webhook():
 
     ok = send_wati_text(phone, reply)
     return jsonify({"status": "ok" if ok else "send_failed", "phone": phone, "reply_preview": reply[:200]})
+
+
+def site_chat_json(payload: Dict[str, Any], status: int = 200):
+    response = jsonify(payload)
+    origin = (os.getenv("YOME_SITE_ALLOWED_ORIGIN") or "*").strip() or "*"
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-YOME-Widget-Key"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    return response, status
+
+
+def site_chat_authorized() -> bool:
+    widget_key = (os.getenv("YOME_SITE_WIDGET_KEY") or "").strip()
+    if not widget_key:
+        return True
+    sent_key = (request.headers.get("X-YOME-Widget-Key") or "").strip()
+    return bool(sent_key) and sent_key == widget_key
+
+
+def site_chat_member_phone(member_id: Any, session_id: Any = "") -> str:
+    member_digits = clean_phone(member_id)
+    if member_digits:
+        return "900000000" + member_digits[-12:]
+
+    session_digits = clean_phone(session_id)
+    if session_digits:
+        return "900000999" + session_digits[-12:]
+
+    return "900000999" + clean_phone(int(uuid.uuid4()))[-12:]
+
+
+def site_chat_is_yome_question(message: str) -> bool:
+    n = norm(message)
+    if not n:
+        return False
+
+    yome_words = [
+        "yome", "hola", "buenas", "ayuda", "asesor", "tienda", "catalogo", "catalogo",
+        "producto", "productos", "precio", "precios", "mayor", "por mayor", "docena",
+        "comprar", "pedido", "orden", "pago", "transferencia", "banco", "direccion",
+        "ubicacion", "horario", "abierto", "envio", "delivery", "whatsapp", "contacto",
+        "hogar", "cocina", "bano", "mueble", "muebles", "electronica", "ferreteria",
+        "papeleria", "lampara", "silla", "mesa", "sofa", "organizador",
+        "商品", "价格", "批发", "地址", "营业", "配送", "付款", "会员", "会员价", "客服", "订单",
+        "product", "price", "wholesale", "delivery", "payment", "order", "member", "membership", "miembro",
+    ]
+    if any(word in n for word in yome_words):
+        return True
+
+    try:
+        return bool(product_search(message, limit=1))
+    except Exception:
+        return False
+
+
+@app.route("/site-chat", methods=["POST", "OPTIONS"])
+def site_chat():
+    if request.method == "OPTIONS":
+        return site_chat_json({"status": "ok"})
+
+    if not site_chat_authorized():
+        return site_chat_json({"status": "error", "message": "Unauthorized"}, 401)
+
+    payload = request.get_json(silent=True) or request.form.to_dict() or {}
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        return site_chat_json({
+            "status": "error",
+            "message": "Escribe una pregunta sobre YOME para poder ayudarte.",
+        }, 400)
+
+    if not site_chat_is_yome_question(message):
+        return site_chat_json({
+            "status": "ok",
+            "reply": (
+                "Soy el asistente de YOME 😊\n"
+                "Puedo ayudarte con productos, precios, catálogo, pagos, dirección, horario, "
+                "entrega y pedidos de YOME."
+            ),
+            "scope": "yome_only",
+        })
+
+    phone = site_chat_member_phone(payload.get("member_id"), payload.get("session_id"))
+    try:
+        reply = handle_customer(phone, message, [])
+    except Exception as exc:
+        print("[YOME SITE CHAT] error:", exc)
+        return site_chat_json({
+            "status": "error",
+            "message": "Ahora mismo no pude responder. Intenta otra vez en un momento.",
+        }, 500)
+
+    return site_chat_json({
+        "status": "ok",
+        "reply": reply,
+        "assistant": "YOME",
+    })
 
 
 @app.get("/")
@@ -1192,7 +1534,7 @@ def product_admin():
 <h1>产品管理 / Productos</h1>
 <a class='btn' href='/manage'>返回 / Volver</a> <a class='btn' href='/product-edit/new'>添加产品 / Agregar</a>
 <form style='margin:15px 0'><input name='q' placeholder='搜索 / Buscar' value='{html.escape(request.args.get("q",""))}'><button>Buscar</button></form>
-<table><tr><th>图片/Foto</th><th>产品/Nombre</th><th>编号/Código</th><th>分类/Categoría</th><th>零售/Detalle</th><th>批发/Mayor</th><th>一打/Docena</th><th>操作</th></tr>
+<table><tr><th>图片/Foto</th><th>产品/Nombre</th><th>编号/Código</th><th>分类/Categoría</th><th>零售/Regular</th><th>会员价/Miembro</th><th>一打/Docena</th><th>操作</th></tr>
 {''.join(trs)}
 </table></body></html>
 """
@@ -1233,7 +1575,7 @@ def product_edit(pid):
 {inp('category','分类 / Categoría')}
 {inp('subcategory','子分类 / Subcategoría')}
 {inp('price_retail','零售价 / Precio detalle')}
-{inp('price_wholesale','批发价 / Precio mayor')}
+{inp('price_wholesale','会员价 / Precio miembro')}
 {inp('price_dozen','一打价 / Docena')}
 {inp('stock','库存 / Stock')}
 {inp('image_urls','图片链接，多张用 | 分开 / Fotos separadas por |')}
@@ -1322,7 +1664,7 @@ def debug_send_log():
 
 # =============================
 # YOME AI V2.2 聊天词库加强
-# 重点：口语、拼写错误、更多产品、批发价、照片请求
+# 重点：口语、拼写错误、更多产品、会员价、照片请求
 # =============================
 
 import csv as _v22_csv
@@ -1387,6 +1729,7 @@ V22_DEFAULT_WORDS = {
     ],
     "wholesale": [
         "mayor", "por mayor", "al mayor", "precio mayor", "mayoreo",
+        "miembro", "precio miembro", "会员价", "会员价格",
         "docena", "por docena", "caja", "por caja", "cantidad"
     ],
     "change_product": [
@@ -1677,18 +2020,18 @@ def v22_delivery_reply():
 
 def v22_wholesale_reply(product):
     name = product.get("product_name", "")
-    mayor = product.get("price_wholesale", "")
+    member = product.get("price_wholesale", "")
     docena = product.get("price_dozen", "")
     price = product.get("price_retail", "")
 
     lines = [f"Para {name} 😊"]
 
     if price:
-        lines.append(f"Precio detalle: RD${money(price)} c/u.")
-    if mayor:
-        lines.append(f"Por mayor desde 3 unidades: RD${money(mayor)} c/u.")
+        lines.append(f"Precio regular: RD${money(price)} c/u.")
+    if member:
+        lines.append(f"Precio miembro: RD${money(member)} c/u.")
     if docena:
-        lines.append(f"Por docena desde 12 unidades: RD${money(docena)} c/u.")
+        lines.append(f"Precio docena desde 12 unidades: RD${money(docena)} c/u.")
 
     lines.append("¿Cuántas unidades deseas?")
     return "\n".join(lines)
@@ -1797,6 +2140,14 @@ def handle_customer(phone: str, text: str, media_urls: list[str]) -> str:
         return "Claro 😊 Buscamos otro producto.\nEnvíame una foto, nombre o código del producto que deseas."
 
     state = get_memory(phone)
+    order_draft = state.get("order_draft") if isinstance(state.get("order_draft"), dict) else {}
+    order_amount = yome_extract_amount(text)
+    if order_draft or (order_amount and yome_order_intent(text)):
+        return yome_order_flow_reply(phone, text, amount=order_amount)
+
+    if yome_membership_intent(text) and not product_search(text, limit=1):
+        return yome_membership_reply()
+
     candidates = state.get("last_candidates")
 
     # 8. 列表选择
@@ -1806,7 +2157,7 @@ def handle_customer(phone: str, text: str, media_urls: list[str]) -> str:
             product = candidates[option - 1]
             set_memory(phone, last_product=product, selected_product=product, awaiting_quantity=not bool(qty), last_candidates=[])
             if qty:
-                return qty_reply(product, qty)
+                return qty_reply(product, qty) + "\n\n" + yome_order_flow_reply(phone, text, product=product, qty=qty)
             return f"Perfecto 😊 Elegiste la opción {option}: {product.get('product_name')}.\n" + product_reply(product)
 
     last_product = state.get("last_product") or state.get("selected_product")
@@ -1822,15 +2173,11 @@ def handle_customer(phone: str, text: str, media_urls: list[str]) -> str:
     # 11. 直接数量
     nums = [int(x) for x in _v22_re.findall(r"\b(\d{1,3})\b", low)]
     if nums and isinstance(last_product, dict):
-        return qty_reply(last_product, nums[0])
+        return qty_reply(last_product, nums[0]) + "\n\n" + yome_order_flow_reply(phone, text, product=last_product, qty=nums[0])
 
     # 12. 是的/确认
     if low in [v22_norm(x) for x in v22_load_words().get("yes", [])] and isinstance(last_product, dict):
-        return (
-            f"Perfecto 😊 Te separo {last_product.get('product_name')}.\n"
-            "¿Cuántas unidades deseas?\n"
-            "También envíame tu nombre, zona/dirección y método de pago."
-        )
+        return yome_order_flow_reply(phone, text, product=last_product)
 
     # 13. 产品搜索
     matches = product_search(text, limit=6)
@@ -3895,11 +4242,11 @@ def yome_par_format_product_v2(p, index=None):
     if p.get("code"):
         out += f"Código: {p.get('code')}\n"
     if p.get("price"):
-        out += f"Precio: {yome_par_money_v2(p.get('price'))}\n"
+        out += f"Precio regular: {yome_par_money_v2(p.get('price'))}\n"
     if p.get("mayor"):
-        out += f"Por mayor: {yome_par_money_v2(p.get('mayor'))}\n"
+        out += f"Precio miembro: {yome_par_money_v2(p.get('mayor'))}\n"
     if p.get("docena"):
-        out += f"Docena: {yome_par_money_v2(p.get('docena'))}\n"
+        out += f"Precio docena: {yome_par_money_v2(p.get('docena'))}\n"
     if p.get("image_url"):
         out += f"Foto: {p.get('image_url')}\n"
 
@@ -3929,7 +4276,10 @@ def yome_par_bot_quote_v2(msg):
         return True
     if "responde con el numero" in n:
         return True
-    if ("foto:" in n or "https://res.cloudinary.com" in n) and ("precio:" in n or "codigo:" in n or "código:" in n):
+    if ("foto:" in n or "https://res.cloudinary.com" in n) and (
+        "precio:" in n or "precio regular" in n or "precio miembro" in n or "precio docena" in n
+        or "codigo:" in n or "código:" in n
+    ):
         return True
     return False
 
@@ -3978,6 +4328,15 @@ def yome_par_make_reply_v2(phone, msg):
             + yome_par_support_link_v2()
         )
 
+    memory = get_memory(phone)
+    order_draft = memory.get("order_draft") if isinstance(memory.get("order_draft"), dict) else {}
+    order_amount = yome_extract_amount(msg)
+    if order_draft or (order_amount and yome_order_intent(msg)):
+        return yome_order_flow_reply(phone, msg, amount=order_amount)
+
+    if yome_membership_intent(msg) and not yome_par_find_matches_v2(msg, limit=1):
+        return yome_membership_reply()
+
     # 客户回复 1/2/3 选择产品
     if re.fullmatch(r"\d{1,2}", str(msg).strip()):
         options = state.get("context", {}).get(phone_key, {}).get("options", [])
@@ -3990,6 +4349,21 @@ def yome_par_make_reply_v2(phone, msg):
             }
             yome_par_save_state_v2(state)
             return yome_par_format_product_v2(p) + "\n¿Cuántas deseas?"
+
+    context = state.get("context", {}).get(phone_key, {})
+    selected = context.get("selected")
+    qty_match = re.fullmatch(r"\d{1,3}", str(msg).strip())
+    if isinstance(selected, dict) and qty_match:
+        qty = int(str(msg).strip())
+        unit, rule = yome_unit_price_for_order(selected, qty)
+        quote = yome_par_format_product_v2(selected)
+        if unit:
+            quote += f"\n\nPara {qty} unidad(es), usando {rule}: RD${money(unit)} c/u."
+            quote += f"\nTotal: RD${money(unit * qty)}"
+        return quote + "\n\n" + yome_order_flow_reply(phone, msg, product=selected, qty=qty)
+
+    if isinstance(selected, dict) and yome_par_norm_v2(msg) in [yome_par_norm_v2(x) for x in v22_load_words().get("yes", [])]:
+        return yome_order_flow_reply(phone, msg, product=selected)
 
     matches = yome_par_find_matches_v2(msg, limit=5)
 
