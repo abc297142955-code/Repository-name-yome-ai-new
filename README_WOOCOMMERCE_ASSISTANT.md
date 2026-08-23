@@ -15,6 +15,8 @@ Files
   - Shows a cartoon YOME assistant on WooCommerce My Account pages by default.
   - Adds a **YOME助手** tab inside WooCommerce My Account for the member page.
   - Uses an animated YOME robot with hover/bob, blinking eyes, and glowing antenna.
+  - Can read the separate **YOME · INVENTARIO** JSON API and send that inventory
+    context to the AI.
   - Proxies chat through WordPress AJAX so the widget key is not exposed in the
     browser.
 
@@ -39,7 +41,8 @@ WordPress install
 4. Set **YOME chat API** to:
    `https://repository-name-yome-ai-new-production.up.railway.app/site-chat`
 5. Set **Widget key** to the same value as `YOME_SITE_WIDGET_KEY`.
-6. Keep display as **WooCommerce My Account only** for member-area behavior.
+6. Enable **YOME · INVENTARIO** and set the inventory JSON API URL.
+7. Keep display as **WooCommerce My Account only** for member-area behavior.
 
 Membership behavior
 -------------------
@@ -51,3 +54,10 @@ Membership behavior
 - The second product price is shown to customers as the YOME member price.
 - If a customer asks to order an amount such as `RD$7800`, the assistant starts
   an order draft and collects name, delivery zone/address, and payment method.
+- When a member asks `que mercancia hay`, `que productos tienen`, `que nuevo hay`,
+  or a specific product name, WordPress queries **YOME · INVENTARIO** and sends
+  product/stock data to the AI.
+- The inventory API can return a list directly, or JSON with `items`, `products`,
+  `data`, `rows`, or `inventory`. Supported item fields include `name`,
+  `product_name`, `sku`, `code`, `stock`, `quantity`, `store`, `price`,
+  `member_price`, `image`, and `url`.

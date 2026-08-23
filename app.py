@@ -863,6 +863,24 @@ def yome_membership_reply() -> str:
     )
 
 
+def yome_catalog_intent(text: str) -> bool:
+    low = norm(text)
+    if not low:
+        return False
+
+    catalog_words = [
+        "catalogo", "catálogo", "mercancia", "mercancía", "mercancias", "mercancías",
+        "producto", "productos", "variedades", "novedad", "novedades", "nuevo", "nueva",
+        "nuevos", "nuevas", "llegaron", "disponible", "disponibles", "venden", "tienen",
+        "hay", "库存", "商品", "产品", "新品", "新货", "目录", "有什么"
+    ]
+    question_words = [
+        "que", "qué", "cual", "cuál", "ver", "mandame", "mándame", "mostrar", "muestra",
+        "quiero ver", "tienes", "tienen", "hay", "catalogo", "catálogo", "有什么"
+    ]
+    return any(word in low for word in catalog_words) and any(word in low for word in question_words)
+
+
 def yome_chinese_amount(text: str) -> float:
     s = str(text or "")
     digits = {
@@ -1034,6 +1052,73 @@ def yome_order_flow_reply(phone: str, text: str, product: Dict[str, Any] | None 
     lines.append(read_text_file(BANK_INFO_FILE, DEFAULT_BANK_INFO))
     lines.append("")
     lines.append("Cuando realices el pago, envíanos el comprobante para confirmar y preparar la entrega 😊")
+    return "\n".join(lines)
+
+
+def yome_inventory_value(item: Dict[str, Any], keys: List[str]) -> str:
+    for key in keys:
+        value = item.get(key)
+        if value not in [None, ""]:
+            return str(value).strip()
+    return ""
+
+
+def yome_inventory_items(context: Any) -> List[Dict[str, Any]]:
+    if not isinstance(context, dict):
+        return []
+    raw = context.get("items") or context.get("products") or context.get("data") or context.get("rows")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def yome_inventory_reply(message: str, context: Any) -> str:
+    if not isinstance(context, dict) or not context.get("enabled"):
+        return ""
+
+    items = yome_inventory_items(context)
+    if not items:
+        if context.get("queried") and yome_catalog_intent(message):
+            if context.get("error"):
+                return (
+                    "Ahora mismo no pude leer YOME · INVENTARIO 😊\n"
+                    "Puedes preguntarme por nombre o código del producto, o intentar otra vez en un momento."
+                )
+            return (
+                "Ahora mismo no encontré productos en YOME · INVENTARIO para esa búsqueda 😊\n"
+                "Puedes probar con otro nombre, código o categoría."
+            )
+        return ""
+
+    lines = ["Sí 😊 Según YOME · INVENTARIO, tenemos estas opciones:"]
+    for index, item in enumerate(items[:10], 1):
+        name = yome_inventory_value(item, ["name", "product_name", "nombre", "title", "producto"]) or "Producto"
+        code = yome_inventory_value(item, ["code", "sku", "codigo", "código", "barcode"])
+        stock = yome_inventory_value(item, ["stock", "qty", "quantity", "cantidad", "existencia", "available"])
+        store = yome_inventory_value(item, ["store", "branch", "location", "warehouse", "tienda", "almacen", "almacén", "门店"])
+        price = yome_inventory_value(item, ["price", "regular_price", "precio", "precio_regular"])
+        member_price = yome_inventory_value(item, ["member_price", "price_member", "precio_miembro", "miembro", "会员价"])
+        image = yome_inventory_value(item, ["image", "image_url", "photo", "foto", "thumbnail"])
+        url = yome_inventory_value(item, ["url", "link", "permalink"])
+
+        lines.append("")
+        lines.append(f"{index}. {name}")
+        if code:
+            lines.append(f"Código: {code}")
+        if price:
+            lines.append(f"Precio regular: RD${money(price)}")
+        if member_price:
+            lines.append(f"Precio miembro: RD${money(member_price)}")
+        lines.append(f"Stock: {stock if stock else 'Disponible / consultar cantidad'}")
+        if store:
+            lines.append(f"Ubicación/Tienda: {store}")
+        if image:
+            lines.append(f"Foto: {image}")
+        if url:
+            lines.append(f"Ver: {url}")
+
+    lines.append("")
+    lines.append("Dime cuál producto quieres y la cantidad, y te ayudo a completar el pedido.")
     return "\n".join(lines)
 
 
@@ -1410,6 +1495,7 @@ def site_chat_is_yome_question(message: str) -> bool:
 
     yome_words = [
         "yome", "hola", "buenas", "ayuda", "asesor", "tienda", "catalogo", "catalogo",
+        "mercancia", "mercancía", "mercancias", "mercancías", "nuevo", "nueva", "nuevos", "nuevas",
         "producto", "productos", "precio", "precios", "mayor", "por mayor", "docena",
         "comprar", "pedido", "orden", "pago", "transferencia", "banco", "direccion",
         "ubicacion", "horario", "abierto", "envio", "delivery", "whatsapp", "contacto",
@@ -1418,6 +1504,9 @@ def site_chat_is_yome_question(message: str) -> bool:
         "商品", "价格", "批发", "地址", "营业", "配送", "付款", "会员", "会员价", "客服", "订单",
         "product", "price", "wholesale", "delivery", "payment", "order", "member", "membership", "miembro",
     ]
+    if yome_catalog_intent(message):
+        return True
+
     if any(word in n for word in yome_words):
         return True
 
@@ -1442,6 +1531,15 @@ def site_chat():
             "status": "error",
             "message": "Escribe una pregunta sobre YOME para poder ayudarte.",
         }, 400)
+
+    inventory_reply = yome_inventory_reply(message, payload.get("yome_inventory_context"))
+    if inventory_reply:
+        return site_chat_json({
+            "status": "ok",
+            "reply": inventory_reply,
+            "assistant": "YOME",
+            "source": "yome_inventory",
+        })
 
     if not site_chat_is_yome_question(message):
         return site_chat_json({
@@ -1947,8 +2045,47 @@ def product_search(query, limit=6):
 
 def v22_catalog_reply():
     products = v22_load_products()
-    cats = []
+    visible_products = []
+    for p in products:
+        name = v22_p_name(p).strip()
+        if not name:
+            continue
+        visible_products.append(p)
 
+    def product_time(p):
+        return str(p.get("updated_at") or p.get("created_at") or "")
+
+    visible_products.sort(key=product_time, reverse=True)
+
+    if visible_products:
+        lines = [
+            "Sí 😊 En el inventario de YOME tenemos estas mercancías disponibles:",
+            "",
+        ]
+        for i, p in enumerate(visible_products[:10], 1):
+            name = v22_p_name(p).strip()
+            code = v22_p_code(p).strip()
+            stock = str(p.get("stock") or "").strip()
+            photo = first_photo(p)
+
+            lines.append(f"{i}. {name}")
+            if code:
+                lines.append(f"Código: {code}")
+            if p.get("price_retail"):
+                lines.append(f"Precio regular: RD${money(p.get('price_retail'))}")
+            if p.get("price_wholesale"):
+                lines.append(f"Precio miembro: RD${money(p.get('price_wholesale'))}")
+            if p.get("price_dozen"):
+                lines.append(f"Precio docena: RD${money(p.get('price_dozen'))}")
+            lines.append(f"Stock: {stock if stock else 'Disponible / consultar cantidad'}")
+            if photo:
+                lines.append(f"Foto: {photo}")
+            lines.append("")
+
+        lines.append("Puedes decirme el nombre, código o número del producto y la cantidad que deseas.")
+        return "\n".join(lines).strip()
+
+    cats = []
     for p in products:
         c = v22_p_category(p).strip()
         if c and c not in cats:
@@ -2088,7 +2225,7 @@ def handle_customer(phone: str, text: str, media_urls: list[str]) -> str:
     low = v22_norm(text)
 
     # 1. 目录/有什么货
-    if v22_has_phrase(text, "catalog"):
+    if v22_has_phrase(text, "catalog") or yome_catalog_intent(text):
         try:
             clear_product_memory(phone)
         except Exception:
@@ -4336,6 +4473,9 @@ def yome_par_make_reply_v2(phone, msg):
 
     if yome_membership_intent(msg) and not yome_par_find_matches_v2(msg, limit=1):
         return yome_membership_reply()
+
+    if yome_catalog_intent(msg):
+        return v22_catalog_reply()
 
     # 客户回复 1/2/3 选择产品
     if re.fullmatch(r"\d{1,2}", str(msg).strip()):

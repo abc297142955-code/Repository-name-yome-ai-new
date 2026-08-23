@@ -73,6 +73,9 @@ final class YOME_WooCommerce_Assistant {
         return [
             'endpoint_url' => 'https://repository-name-yome-ai-new-production.up.railway.app/site-chat',
             'widget_key' => '',
+            'inventory_enabled' => 'no',
+            'inventory_api_url' => '',
+            'inventory_api_key' => '',
             'display_scope' => 'account',
             'enabled' => 'yes',
         ];
@@ -105,6 +108,9 @@ final class YOME_WooCommerce_Assistant {
         if ($_SERVER['REQUEST_METHOD'] === 'POST' && check_admin_referer('yome_assistant_settings')) {
             $endpoint_url = esc_url_raw(wp_unslash($_POST['endpoint_url'] ?? ''));
             $widget_key = sanitize_text_field(wp_unslash($_POST['widget_key'] ?? ''));
+            $inventory_enabled = !empty($_POST['inventory_enabled']) ? 'yes' : 'no';
+            $inventory_api_url = esc_url_raw(wp_unslash($_POST['inventory_api_url'] ?? ''));
+            $inventory_api_key = sanitize_text_field(wp_unslash($_POST['inventory_api_key'] ?? ''));
             $display_scope = sanitize_key(wp_unslash($_POST['display_scope'] ?? 'account'));
             $enabled = !empty($_POST['enabled']) ? 'yes' : 'no';
 
@@ -115,6 +121,9 @@ final class YOME_WooCommerce_Assistant {
             $options = [
                 'endpoint_url' => $endpoint_url,
                 'widget_key' => $widget_key,
+                'inventory_enabled' => $inventory_enabled,
+                'inventory_api_url' => $inventory_api_url,
+                'inventory_api_key' => $inventory_api_key,
                 'display_scope' => $display_scope,
                 'enabled' => $enabled,
             ];
@@ -143,6 +152,31 @@ final class YOME_WooCommerce_Assistant {
                             <input name="widget_key" id="widget_key" type="password" class="regular-text"
                                    value="<?php echo esc_attr($options['widget_key']); ?>" autocomplete="new-password" />
                             <p class="description">Use the same value as the Flask environment variable YOME_SITE_WIDGET_KEY.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">YOME · INVENTARIO</th>
+                        <td>
+                            <label>
+                                <input name="inventory_enabled" type="checkbox" value="yes" <?php checked($options['inventory_enabled'], 'yes'); ?> />
+                                Use YOME inventory data for AI replies
+                            </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="inventory_api_url">Inventory API URL</label></th>
+                        <td>
+                            <input name="inventory_api_url" id="inventory_api_url" type="url" class="regular-text"
+                                   value="<?php echo esc_attr($options['inventory_api_url']); ?>" />
+                            <p class="description">The YOME · INVENTARIO endpoint that returns JSON products/stock. It can receive q and limit query parameters.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="inventory_api_key">Inventory API key</label></th>
+                        <td>
+                            <input name="inventory_api_key" id="inventory_api_key" type="password" class="regular-text"
+                                   value="<?php echo esc_attr($options['inventory_api_key']); ?>" autocomplete="new-password" />
+                            <p class="description">Optional. Sent as X-YOME-Inventory-Key and Bearer authorization.</p>
                         </td>
                     </tr>
                     <tr>
@@ -314,6 +348,7 @@ final class YOME_WooCommerce_Assistant {
         if (!empty($options['widget_key'])) {
             $headers['X-YOME-Widget-Key'] = $options['widget_key'];
         }
+        $inventory_context = self::yome_inventory_context($message, $options);
 
         $response = wp_remote_post($endpoint, [
             'timeout' => 20,
@@ -325,6 +360,7 @@ final class YOME_WooCommerce_Assistant {
                 'member_name' => $user ? $user->display_name : '',
                 'source' => 'woocommerce',
                 'site' => home_url('/'),
+                'yome_inventory_context' => $inventory_context,
             ]),
         ]);
 
@@ -341,6 +377,159 @@ final class YOME_WooCommerce_Assistant {
         wp_send_json_success([
             'reply' => wp_kses_post($body['reply'] ?? $body['message'] ?? 'No pude responder ahora.'),
         ]);
+    }
+
+    private static function yome_inventory_context(string $message, array $options): array {
+        if (($options['inventory_enabled'] ?? 'no') !== 'yes' || empty($options['inventory_api_url'])) {
+            return ['enabled' => false, 'queried' => false, 'items' => []];
+        }
+
+        $message_norm = self::normalize_text($message);
+        $inventory_intent = self::inventory_question_intent($message_norm);
+        $search = self::inventory_search_terms($message_norm);
+
+        if (!$inventory_intent && $search === '') {
+            return ['enabled' => true, 'queried' => false, 'items' => []];
+        }
+
+        $url = add_query_arg([
+            'q' => $search !== '' ? $search : $message,
+            'limit' => 12,
+        ], $options['inventory_api_url']);
+
+        $headers = ['Accept' => 'application/json'];
+        if (!empty($options['inventory_api_key'])) {
+            $headers['X-YOME-Inventory-Key'] = $options['inventory_api_key'];
+            $headers['Authorization'] = 'Bearer ' . $options['inventory_api_key'];
+        }
+
+        $response = wp_remote_get($url, [
+            'timeout' => 12,
+            'headers' => $headers,
+        ]);
+
+        if (is_wp_error($response)) {
+            return [
+                'enabled' => true,
+                'queried' => true,
+                'error' => $response->get_error_message(),
+                'items' => [],
+            ];
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code < 200 || $code >= 300 || !is_array($body)) {
+            return [
+                'enabled' => true,
+                'queried' => true,
+                'error' => 'invalid_inventory_response',
+                'items' => [],
+            ];
+        }
+
+        return [
+            'enabled' => true,
+            'queried' => true,
+            'query' => $message,
+            'search' => $search,
+            'items' => self::extract_inventory_items($body),
+        ];
+    }
+
+    private static function extract_inventory_items(array $body): array {
+        $items = $body;
+        foreach (['items', 'products', 'data', 'rows', 'inventory'] as $key) {
+            if (isset($body[$key]) && is_array($body[$key])) {
+                $items = $body[$key];
+                break;
+            }
+        }
+
+        if (!self::is_list_array($items)) {
+            return [];
+        }
+
+        $clean = [];
+        foreach (array_slice($items, 0, 12) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $clean[] = [
+                'name' => self::first_value($item, ['name', 'product_name', 'nombre', 'title', 'producto']),
+                'code' => self::first_value($item, ['code', 'sku', 'codigo', 'código', 'barcode']),
+                'category' => self::first_value($item, ['category', 'categoria', 'categoría']),
+                'stock' => self::first_value($item, ['stock', 'qty', 'quantity', 'cantidad', 'existencia', 'available']),
+                'store' => self::first_value($item, ['store', 'branch', 'location', 'warehouse', 'tienda', 'almacen', 'almacén', '门店']),
+                'price' => self::first_value($item, ['price', 'regular_price', 'precio', 'precio_regular']),
+                'member_price' => self::first_value($item, ['member_price', 'price_member', 'precio_miembro', 'miembro', '会员价']),
+                'image' => self::first_value($item, ['image', 'image_url', 'photo', 'foto', 'thumbnail']),
+                'url' => self::first_value($item, ['url', 'link', 'permalink']),
+                'updated_at' => self::first_value($item, ['updated_at', 'created_at', 'date', 'fecha']),
+            ];
+        }
+
+        return $clean;
+    }
+
+    private static function first_value(array $item, array $keys): string {
+        foreach ($keys as $key) {
+            if (isset($item[$key]) && $item[$key] !== '') {
+                return is_scalar($item[$key]) ? (string) $item[$key] : '';
+            }
+        }
+        return '';
+    }
+
+    private static function is_list_array(array $items): bool {
+        $index = 0;
+        foreach ($items as $key => $_value) {
+            if ($key !== $index) {
+                return false;
+            }
+            $index++;
+        }
+        return true;
+    }
+
+    private static function inventory_question_intent(string $message_norm): bool {
+        $words = [
+            'mercancia', 'mercancias', 'producto', 'productos', 'catalogo', 'inventario',
+            'stock', 'existencia', 'disponible', 'nuevo', 'nueva', 'nuevos', 'nuevas',
+            'novedades', 'hay', 'tienen', 'venden', '货', '库存', '产品', '商品', '新品', '新货'
+        ];
+        foreach ($words as $word) {
+            if (strpos($message_norm, $word) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function inventory_search_terms(string $message_norm): string {
+        $stop_words = [
+            'que', 'hay', 'tiene', 'tienen', 'precio', 'precios', 'quiero', 'buscar',
+            'busco', 'dame', 'ver', 'mercancia', 'mercancias', 'producto', 'productos',
+            'catalogo', 'inventario', 'stock', 'nuevo', 'nueva', 'nuevos', 'nuevas',
+            'disponible', 'disponibles', 'por', 'favor', 'yome', 'miembro', '会员价'
+        ];
+        $tokens = preg_split('/\s+/', $message_norm);
+        $kept = [];
+        foreach ($tokens as $token) {
+            $token = trim((string) $token);
+            if ($token === '' || in_array($token, $stop_words, true) || strlen($token) < 3) {
+                continue;
+            }
+            $kept[] = $token;
+        }
+        return implode(' ', array_slice($kept, 0, 4));
+    }
+
+    private static function normalize_text(string $text): string {
+        $text = strtolower(remove_accents(wp_strip_all_tags($text)));
+        $text = preg_replace('/[^a-z0-9\s\x{4e00}-\x{9fff}]/u', ' ', $text);
+        $text = preg_replace('/\s+/', ' ', $text);
+        return trim((string) $text);
     }
 
     private static function css(): string {

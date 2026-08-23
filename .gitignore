@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.log
+build/
 
 # 本地数据 / 客户记录，不上传 GitHub
 chat_history.json
