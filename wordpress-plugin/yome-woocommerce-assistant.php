@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.3
+ * Version: 1.0.4
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -175,7 +175,7 @@ final class YOME_WooCommerce_Assistant {
                         <td>
                             <input name="inventory_api_url" id="inventory_api_url" type="url" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_api_url']); ?>" />
-                            <p class="description">Optional. Leave blank to read live inventory from this WordPress database automatically. If using an external endpoint, it can receive q and limit query parameters.</p>
+                            <p class="description">Leave blank to read live inventory from this WordPress/member system automatically. Do not paste the built-in API here; it is only for testing or external tools.</p>
                             <p class="description">Built-in API after activation: <code><?php echo esc_html(rest_url('yome-assistant/v1/inventory')); ?></code></p>
                         </td>
                     </tr>
@@ -226,6 +226,7 @@ final class YOME_WooCommerce_Assistant {
                 </table>
                 <?php submit_button(); ?>
             </form>
+            <?php self::settings_inventory_preview($options); ?>
         </div>
         <?php
     }
@@ -240,6 +241,52 @@ final class YOME_WooCommerce_Assistant {
         }
 
         return true;
+    }
+
+    private static function settings_inventory_preview(array $options): void {
+        if (($options['inventory_enabled'] ?? 'no') !== 'yes') {
+            echo '<h2>Inventory preview</h2>';
+            echo '<p>Turn on YOME · INVENTARIO and save to preview live member inventory here.</p>';
+            return;
+        }
+
+        $context = self::yome_inventory_context('que mercancia hay', $options);
+        $items = self::yome_inventory_context_items($context);
+
+        echo '<h2>Inventory preview</h2>';
+        echo '<p><strong>Source:</strong> ' . esc_html((string) ($context['source'] ?? 'configured inventory')) . '</p>';
+        echo '<p><strong>Items:</strong> ' . esc_html((string) count($items)) . '</p>';
+        if (!empty($context['error'])) {
+            echo '<p><strong>Error:</strong> ' . esc_html((string) $context['error']) . '</p>';
+        }
+
+        if (!$items) {
+            echo '<p>No inventory rows found yet. The chat will not use old CSV stock.</p>';
+            return;
+        }
+
+        echo '<table class="widefat striped" style="max-width:1000px">';
+        echo '<thead><tr><th>Name</th><th>Code</th><th>Stock</th><th>Price</th><th>Member price</th><th>Store</th></tr></thead><tbody>';
+        foreach (array_slice($items, 0, 8) as $item) {
+            echo '<tr>';
+            echo '<td>' . esc_html((string) ($item['name'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($item['code'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($item['stock'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($item['price'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($item['member_price'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($item['store'] ?? '')) . '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+    }
+
+    private static function yome_inventory_context_items(array $context): array {
+        foreach (['items', 'products', 'data', 'rows'] as $key) {
+            if (!empty($context[$key]) && is_array($context[$key])) {
+                return array_filter($context[$key], 'is_array');
+            }
+        }
+        return [];
     }
 
     private static function should_render(): bool {
@@ -503,7 +550,8 @@ final class YOME_WooCommerce_Assistant {
             return ['enabled' => true, 'queried' => false, 'items' => []];
         }
 
-        if (empty($options['inventory_api_url'])) {
+        $inventory_api_url = trim((string) ($options['inventory_api_url'] ?? ''));
+        if ($inventory_api_url === '' || self::is_builtin_inventory_api_url($inventory_api_url)) {
             return self::local_inventory_context($message, $search);
         }
 
@@ -511,7 +559,7 @@ final class YOME_WooCommerce_Assistant {
             'q' => $search !== '' ? $search : $message,
             'limit' => 12,
             '_yome_live' => time(),
-        ], $options['inventory_api_url']);
+        ], $inventory_api_url);
 
         $headers = [
             'Accept' => 'application/json',
@@ -576,8 +624,26 @@ final class YOME_WooCommerce_Assistant {
             'source' => 'local_wordpress_database',
             'live' => true,
             'fetched_at' => gmdate('c'),
-            'items' => self::local_inventory_items($search !== '' ? $search : $message, 12),
+            'items' => self::local_inventory_items($search, 12),
         ];
+    }
+
+    private static function is_builtin_inventory_api_url(string $url): bool {
+        $path = wp_parse_url($url, PHP_URL_PATH);
+        if (is_string($path) && strpos($path, '/wp-json/yome-assistant/v1/inventory') !== false) {
+            return true;
+        }
+
+        $query = wp_parse_url($url, PHP_URL_QUERY);
+        if (is_string($query)) {
+            parse_str($query, $params);
+            $rest_route = isset($params['rest_route']) ? (string) $params['rest_route'] : '';
+            if (strpos($rest_route, '/yome-assistant/v1/inventory') === 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static function local_inventory_items(string $search = '', int $limit = 12): array {

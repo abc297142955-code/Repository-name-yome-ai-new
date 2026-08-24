@@ -24,6 +24,8 @@ Files
   - If no separate YOME inventory table is found, it falls back to live
     WooCommerce/member-system product inventory. It does not use the POS/caja
     catalog route.
+  - The settings page shows an admin-only inventory preview, so admins can test
+    live inventory without opening the protected REST API directly.
   - Requests inventory live for each customer question with no-cache headers and
     a cache-busting timestamp, so old product data is not reused.
   - Proxies chat through WordPress AJAX so the widget key is not exposed in the
@@ -57,6 +59,9 @@ WordPress install
 7. Optional: use the built-in API URL
    `https://yome.it.com/wp-json/yome-assistant/v1/inventory` for testing after
    the plugin is active. It accepts `q` and `limit`.
+   A direct browser request can return `401 rest_forbidden`; that only means the
+   REST endpoint is protected. The member chat and settings preview read the
+   inventory server-side.
 8. Admin-only diagnostics:
    `https://yome.it.com/wp-json/yome-assistant/v1/inventory-debug`.
 9. If YOME · INVENTARIO requires a login, fill **Inventory username** and
