@@ -17,6 +17,8 @@ Files
   - Uses an animated YOME robot with hover/bob, blinking eyes, and glowing antenna.
   - Can read the separate **YOME · INVENTARIO** JSON API and send that inventory
     context to the AI.
+  - Requests inventory live for each customer question with no-cache headers and
+    a cache-busting timestamp, so old product data is not reused.
   - Proxies chat through WordPress AJAX so the widget key is not exposed in the
     browser.
 
@@ -41,8 +43,11 @@ WordPress install
 4. Set **YOME chat API** to:
    `https://repository-name-yome-ai-new-production.up.railway.app/site-chat`
 5. Set **Widget key** to the same value as `YOME_SITE_WIDGET_KEY`.
-6. Enable **YOME · INVENTARIO** and set the inventory JSON API URL.
-7. Keep display as **WooCommerce My Account only** for member-area behavior.
+6. Enable **YOME · INVENTARIO** and set the inventory JSON API URL. Use a JSON
+   endpoint, not a `wp-admin/admin.php` page.
+7. If YOME · INVENTARIO requires a login, fill **Inventory username** and
+   **Inventory password** in WordPress settings. Do not commit credentials to GitHub.
+8. Keep display as **WooCommerce My Account only** for member-area behavior.
 
 Membership behavior
 -------------------
@@ -57,6 +62,9 @@ Membership behavior
 - When a member asks `que mercancia hay`, `que productos tienen`, `que nuevo hay`,
   or a specific product name, WordPress queries **YOME · INVENTARIO** and sends
   product/stock data to the AI.
+- Member chat product questions require live YOME · INVENTARIO data. If the live
+  inventory API is not configured or returns no data, `/site-chat` will not fall
+  back to the older local `products.csv` catalog.
 - The inventory API can return a list directly, or JSON with `items`, `products`,
   `data`, `rows`, or `inventory`. Supported item fields include `name`,
   `product_name`, `sku`, `code`, `stock`, `quantity`, `store`, `price`,

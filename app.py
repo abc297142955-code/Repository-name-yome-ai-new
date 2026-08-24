@@ -1078,11 +1078,14 @@ def yome_inventory_reply(message: str, context: Any) -> str:
 
     items = yome_inventory_items(context)
     if not items:
-        if context.get("queried") and yome_catalog_intent(message):
+        inventory_was_queried = bool(context.get("queried")) and (
+            yome_catalog_intent(message) or bool(context.get("search")) or bool(context.get("query"))
+        )
+        if inventory_was_queried:
             if context.get("error"):
                 return (
                     "Ahora mismo no pude leer YOME · INVENTARIO 😊\n"
-                    "Puedes preguntarme por nombre o código del producto, o intentar otra vez en un momento."
+                    "Para darte el stock actualizado, intenta otra vez en un momento o consulta con un asesor."
                 )
             return (
                 "Ahora mismo no encontré productos en YOME · INVENTARIO para esa búsqueda 😊\n"
@@ -1516,6 +1519,36 @@ def site_chat_is_yome_question(message: str) -> bool:
         return False
 
 
+def site_chat_needs_live_inventory(message: str, payload: Dict[str, Any], context: Any) -> bool:
+    source = str(payload.get("source") or "").strip().lower()
+    if source not in {"woocommerce", "wordpress", "site"}:
+        return False
+
+    if yome_catalog_intent(message):
+        return True
+
+    if isinstance(context, dict) and (context.get("queried") or context.get("search")):
+        return True
+
+    try:
+        return bool(product_search(message, limit=1))
+    except Exception:
+        return False
+
+
+def site_chat_live_inventory_unavailable_reply(context: Any) -> str:
+    if isinstance(context, dict) and context.get("enabled"):
+        return (
+            "Para darte el inventario actualizado, necesito leer YOME · INVENTARIO en vivo 😊\n"
+            "Ahora mismo no llegó información nueva de inventario para esa búsqueda. Intenta con otro nombre o consulta con un asesor."
+        )
+
+    return (
+        "Para responder con stock actualizado, primero hay que conectar YOME · INVENTARIO en vivo 😊\n"
+        "No voy a usar el inventario viejo. Configura el Inventory API URL en YOME Assistant y vuelvo a consultar la mercancía actual."
+    )
+
+
 @app.route("/site-chat", methods=["POST", "OPTIONS"])
 def site_chat():
     if request.method == "OPTIONS":
@@ -1532,13 +1565,22 @@ def site_chat():
             "message": "Escribe una pregunta sobre YOME para poder ayudarte.",
         }, 400)
 
-    inventory_reply = yome_inventory_reply(message, payload.get("yome_inventory_context"))
+    inventory_context = payload.get("yome_inventory_context")
+    inventory_reply = yome_inventory_reply(message, inventory_context)
     if inventory_reply:
         return site_chat_json({
             "status": "ok",
             "reply": inventory_reply,
             "assistant": "YOME",
             "source": "yome_inventory",
+        })
+
+    if site_chat_needs_live_inventory(message, payload, inventory_context):
+        return site_chat_json({
+            "status": "ok",
+            "reply": site_chat_live_inventory_unavailable_reply(inventory_context),
+            "assistant": "YOME",
+            "source": "yome_inventory_required",
         })
 
     if not site_chat_is_yome_question(message):

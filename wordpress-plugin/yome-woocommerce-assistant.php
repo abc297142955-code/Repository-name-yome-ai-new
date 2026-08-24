@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -76,6 +76,8 @@ final class YOME_WooCommerce_Assistant {
             'inventory_enabled' => 'no',
             'inventory_api_url' => '',
             'inventory_api_key' => '',
+            'inventory_username' => '',
+            'inventory_password' => '',
             'display_scope' => 'account',
             'enabled' => 'yes',
         ];
@@ -111,6 +113,8 @@ final class YOME_WooCommerce_Assistant {
             $inventory_enabled = !empty($_POST['inventory_enabled']) ? 'yes' : 'no';
             $inventory_api_url = esc_url_raw(wp_unslash($_POST['inventory_api_url'] ?? ''));
             $inventory_api_key = sanitize_text_field(wp_unslash($_POST['inventory_api_key'] ?? ''));
+            $inventory_username = sanitize_text_field(wp_unslash($_POST['inventory_username'] ?? ''));
+            $inventory_password = sanitize_text_field(wp_unslash($_POST['inventory_password'] ?? ''));
             $display_scope = sanitize_key(wp_unslash($_POST['display_scope'] ?? 'account'));
             $enabled = !empty($_POST['enabled']) ? 'yes' : 'no';
 
@@ -124,6 +128,8 @@ final class YOME_WooCommerce_Assistant {
                 'inventory_enabled' => $inventory_enabled,
                 'inventory_api_url' => $inventory_api_url,
                 'inventory_api_key' => $inventory_api_key,
+                'inventory_username' => $inventory_username,
+                'inventory_password' => $inventory_password,
                 'display_scope' => $display_scope,
                 'enabled' => $enabled,
             ];
@@ -177,6 +183,22 @@ final class YOME_WooCommerce_Assistant {
                             <input name="inventory_api_key" id="inventory_api_key" type="password" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_api_key']); ?>" autocomplete="new-password" />
                             <p class="description">Optional. Sent as X-YOME-Inventory-Key and Bearer authorization.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="inventory_username">Inventory username</label></th>
+                        <td>
+                            <input name="inventory_username" id="inventory_username" type="text" class="regular-text"
+                                   value="<?php echo esc_attr($options['inventory_username']); ?>" autocomplete="off" />
+                            <p class="description">Optional. Use this when YOME · INVENTARIO requires an account login.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="inventory_password">Inventory password</label></th>
+                        <td>
+                            <input name="inventory_password" id="inventory_password" type="password" class="regular-text"
+                                   value="<?php echo esc_attr($options['inventory_password']); ?>" autocomplete="new-password" />
+                            <p class="description">Optional. Sent with Inventory username as Basic authorization.</p>
                         </td>
                     </tr>
                     <tr>
@@ -395,17 +417,30 @@ final class YOME_WooCommerce_Assistant {
         $url = add_query_arg([
             'q' => $search !== '' ? $search : $message,
             'limit' => 12,
+            '_yome_live' => time(),
         ], $options['inventory_api_url']);
 
-        $headers = ['Accept' => 'application/json'];
+        $headers = [
+            'Accept' => 'application/json',
+            'Cache-Control' => 'no-cache, no-store, must-revalidate',
+            'Pragma' => 'no-cache',
+            'Expires' => '0',
+        ];
         if (!empty($options['inventory_api_key'])) {
             $headers['X-YOME-Inventory-Key'] = $options['inventory_api_key'];
             $headers['Authorization'] = 'Bearer ' . $options['inventory_api_key'];
+        }
+        if (!empty($options['inventory_username']) || !empty($options['inventory_password'])) {
+            $headers['Authorization'] = 'Basic ' . base64_encode(
+                ($options['inventory_username'] ?? '') . ':' . ($options['inventory_password'] ?? '')
+            );
         }
 
         $response = wp_remote_get($url, [
             'timeout' => 12,
             'headers' => $headers,
+            'redirection' => 2,
+            'httpversion' => '1.1',
         ]);
 
         if (is_wp_error($response)) {
@@ -433,6 +468,8 @@ final class YOME_WooCommerce_Assistant {
             'queried' => true,
             'query' => $message,
             'search' => $search,
+            'live' => true,
+            'fetched_at' => gmdate('c'),
             'items' => self::extract_inventory_items($body),
         ];
     }
@@ -613,6 +650,7 @@ CSS;
           fetch(window.YOMEAssistantConfig.ajaxUrl, {
             method: 'POST',
             credentials: 'same-origin',
+            cache: 'no-store',
             headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
             body: body.toString()
           }).then(function(res){ return res.json(); }).then(function(data){
