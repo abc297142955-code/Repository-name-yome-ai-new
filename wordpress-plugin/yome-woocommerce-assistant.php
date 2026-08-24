@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.7
+ * Version: 1.0.8
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -614,9 +614,10 @@ final class YOME_WooCommerce_Assistant {
             return self::local_inventory_context($message, $search, $can_view_inventory_sales, $options);
         }
 
+        $request_limit = self::inventory_request_limit($message_norm);
         $url = add_query_arg([
             'q' => $search !== '' ? $search : $message,
-            'limit' => 12,
+            'limit' => $request_limit,
             '_yome_live' => time(),
         ], $inventory_api_url);
 
@@ -675,7 +676,7 @@ final class YOME_WooCommerce_Assistant {
             'can_view_inventory_sales' => $can_view_inventory_sales,
             'live' => true,
             'fetched_at' => gmdate('c'),
-            'items' => self::extract_inventory_items($body, $can_view_inventory_sales),
+            'items' => self::extract_inventory_items($body, $can_view_inventory_sales, 12),
         ];
     }
 
@@ -976,7 +977,7 @@ final class YOME_WooCommerce_Assistant {
             'sales' => ['sales', 'totalsales', 'sold', 'soldqty', 'quantitysold', 'vendido', 'vendidos', 'ventas', 'cantidadvendida', 'unidadesvendidas', 'salida', 'salidas', 'egreso', 'egresos', 'orders', 'ordercount', '销量', '销售', '销售量', '卖出', '已售'],
             'image' => ['image', 'imageurl', 'photo', 'foto', 'thumbnail', 'imagen', 'imageurls', '图片', '照片'],
             'url' => ['url', 'link', 'permalink'],
-            'updated_at' => ['updatedat', 'createdat', 'date', 'fecha', 'modified', 'updated'],
+            'updated_at' => ['updatedat', 'createdat', 'createddate', 'date', 'fecha', 'modified', 'updated'],
         ];
 
         $normalized = [];
@@ -1082,7 +1083,55 @@ final class YOME_WooCommerce_Assistant {
         return (string) preg_replace('/[^a-z0-9\x{4e00}-\x{9fff}]+/u', '', $text);
     }
 
-    private static function extract_inventory_items(array $body, bool $include_sales = false): array {
+    private static function inventory_latest_intent(string $message_norm): bool {
+        $words = [
+            'nuevo', 'nueva', 'nuevos', 'nuevas', 'novedad', 'novedades',
+            'llegaron', 'reciente', 'recientes', 'ultimo', 'ultimos',
+            'latest', 'new', '新货', '新品', '最新', '新到', '到货'
+        ];
+        foreach ($words as $word) {
+            if (strpos($message_norm, $word) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static function inventory_request_limit(string $message_norm): int {
+        return self::inventory_latest_intent($message_norm) ? 50 : 12;
+    }
+
+    private static function inventory_item_timestamp(array $item): int {
+        $date = self::first_value($item, ['updated_at', 'created_at', 'created_date', 'date', 'fecha', 'modified']);
+        if ($date === '') {
+            return 0;
+        }
+
+        $timestamp = strtotime($date);
+        return $timestamp ? (int) $timestamp : 0;
+    }
+
+    private static function sort_inventory_items_latest(array $items): array {
+        $has_dates = false;
+        foreach ($items as $item) {
+            if (is_array($item) && self::inventory_item_timestamp($item) > 0) {
+                $has_dates = true;
+                break;
+            }
+        }
+        if (!$has_dates) {
+            return $items;
+        }
+
+        usort($items, static function ($a, $b) {
+            $left = is_array($a) ? self::inventory_item_timestamp($a) : 0;
+            $right = is_array($b) ? self::inventory_item_timestamp($b) : 0;
+            return $right <=> $left;
+        });
+        return $items;
+    }
+
+    private static function extract_inventory_items(array $body, bool $include_sales = false, int $limit = 12): array {
         $items = $body;
         foreach (['items', 'products', 'data', 'rows', 'inventory'] as $key) {
             if (isset($body[$key]) && is_array($body[$key])) {
@@ -1095,11 +1144,10 @@ final class YOME_WooCommerce_Assistant {
             return [];
         }
 
+        $items = self::sort_inventory_items_latest(array_filter($items, 'is_array'));
+        $limit = max(1, min(50, absint($limit)));
         $clean = [];
-        foreach (array_slice($items, 0, 12) as $item) {
-            if (!is_array($item)) {
-                continue;
-            }
+        foreach (array_slice($items, 0, $limit) as $item) {
             $clean_item = [
                 'name' => self::first_value($item, ['name', 'product_name', 'nombre', 'title', 'producto']),
                 'code' => self::first_value($item, ['code', 'sku', 'codigo', 'código', 'barcode']),
@@ -1110,7 +1158,7 @@ final class YOME_WooCommerce_Assistant {
                 'member_price' => self::first_value($item, ['member_price', 'wholesale_price', 'min_wholesale_price', 'price_member', 'precio_miembro', 'miembro', '会员价']),
                 'image' => self::first_value($item, ['image', 'image_url', 'main_photo_url', 'photo', 'foto', 'thumbnail']),
                 'url' => self::first_value($item, ['url', 'link', 'permalink']),
-                'updated_at' => self::first_value($item, ['updated_at', 'created_at', 'date', 'fecha']),
+                'updated_at' => self::first_value($item, ['updated_at', 'created_at', 'created_date', 'date', 'fecha', 'modified']),
             ];
             if ($include_sales) {
                 $clean_item['sales'] = self::first_value($item, [

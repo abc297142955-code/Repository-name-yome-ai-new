@@ -29,6 +29,9 @@ Files
     are sent only for users with admin/store-manager permissions.
   - Requests inventory live for each customer question with no-cache headers and
     a cache-busting timestamp, so old product data is not reused.
+  - When the customer asks for new arrivals, for example `que nuevo hay` or
+    `有什么新货`, the assistant requests more YOME inventory rows and answers
+    with the newest products first by inventory date.
   - Proxies chat through WordPress AJAX so the widget key is not exposed in the
     browser.
 
@@ -109,6 +112,9 @@ Membership behavior
 - When a member asks `que mercancia hay`, `que productos tienen`, `que nuevo hay`,
   or a specific product name, WordPress queries **YOME · INVENTARIO** and sends
   product/stock data to the AI.
+- New-arrival questions are sorted by `updated_at`, `created_at`,
+  `created_date`, `fecha`, or similar date fields when the inventory API
+  provides them.
 - If **Inventory API URL** is blank, the plugin scans likely custom inventory
   tables and inventory-like columns such as `producto`, `cantidad`,
   `existencia`, `stock`, `precio`, `salida`, `tienda`, or `almacen`, maps
@@ -132,7 +138,7 @@ Membership behavior
 - The separate YOME inventory app uses `POST /api/login` to return a token, then
   `GET /api/products` to return inventory. The assistant maps fields such as
   `name`, `code`, `stock_qty`, `retail_price`, `wholesale_price`,
-  `main_photo_url`, and `low_location_text`.
+  `main_photo_url`, `low_location_text`, `created_at`, and `created_date`.
 - Chat records are append-only. `/chat-inbox` shows the normal chat window,
   `/customer-chat-records` shows older customer logs, and
   `/chat-retention-check` confirms that logs are not auto-deleted and are also

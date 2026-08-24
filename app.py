@@ -1110,6 +1110,7 @@ def yome_inventory_reply(message: str, context: Any, can_view_inventory_sales: b
         ])
         image = yome_inventory_value(item, ["image", "image_url", "main_photo_url", "photo", "foto", "thumbnail"])
         url = yome_inventory_value(item, ["url", "link", "permalink"])
+        date = yome_inventory_value(item, ["updated_at", "created_at", "created_date", "date", "fecha", "modified"])
 
         lines.append("")
         lines.append(f"{index}. {name}")
@@ -1124,6 +1125,8 @@ def yome_inventory_reply(message: str, context: Any, can_view_inventory_sales: b
             lines.append(f"Ventas registradas: {sales}")
         if store:
             lines.append(f"Ubicación/Tienda: {store}")
+        if date:
+            lines.append(f"Fecha: {date}")
         if image:
             lines.append(f"Foto: {image}")
         if url:
@@ -1172,6 +1175,40 @@ def yome_inventory_search_query(message: str) -> str:
     return " ".join(terms[:4])
 
 
+def yome_inventory_latest_intent(text: str) -> bool:
+    low = norm(text)
+    return any(word in low for word in [
+        "nuevo", "nueva", "nuevos", "nuevas", "novedad", "novedades",
+        "llegaron", "reciente", "recientes", "ultimo", "último", "ultimos",
+        "últimos", "latest", "new", "新货", "新品", "最新", "新到", "到货",
+    ])
+
+
+def yome_inventory_item_timestamp(item: Dict[str, Any]) -> float:
+    raw = yome_inventory_value(item, ["updated_at", "created_at", "created_date", "date", "fecha", "modified"])
+    if not raw:
+        return 0
+
+    text = raw.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except Exception:
+        pass
+
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"]:
+        try:
+            return time.mktime(time.strptime(raw[:19], fmt))
+        except Exception:
+            pass
+    return 0
+
+
+def yome_inventory_sort_latest(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not any(yome_inventory_item_timestamp(item) for item in items):
+        return items
+    return sorted(items, key=yome_inventory_item_timestamp, reverse=True)
+
+
 def yome_inventory_extract_body_items(body: Any, include_sales: bool = False, limit: int = 12) -> List[Dict[str, Any]]:
     if isinstance(body, list):
         raw_items = body
@@ -1185,10 +1222,9 @@ def yome_inventory_extract_body_items(body: Any, include_sales: bool = False, li
     else:
         raw_items = []
 
+    raw_items = yome_inventory_sort_latest([item for item in raw_items if isinstance(item, dict)])
     items: List[Dict[str, Any]] = []
     for raw in raw_items[:max(1, min(50, int(limit or 12)))]:
-        if not isinstance(raw, dict):
-            continue
         item = dict(raw)
         if not include_sales:
             item = {k: v for k, v in item.items() if norm(k) not in YOME_INVENTORY_SALES_KEYS}
@@ -1248,8 +1284,12 @@ def yome_remote_inventory_context(message: str, can_view_inventory_sales: bool =
         return {"enabled": False, "queried": False, "items": []}
 
     query = yome_inventory_search_query(message)
+    fetch_limit = max(1, min(50, int(limit or 12)))
+    if yome_inventory_latest_intent(message):
+        fetch_limit = max(fetch_limit, 50)
+
     params = {
-        "limit": str(max(1, min(50, int(limit or 12)))),
+        "limit": str(fetch_limit),
         "_yome_live": str(int(time.time())),
     }
     if query:
