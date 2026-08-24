@@ -1135,6 +1135,141 @@ def yome_inventory_reply(message: str, context: Any, can_view_inventory_sales: b
     return "\n".join(lines)
 
 
+YOME_INVENTORY_SALES_KEYS = {
+    "sales", "total_sales", "sold", "sold_qty", "quantity_sold",
+    "vendido", "vendidos", "ventas", "cantidad_vendida", "unidades_vendidas",
+    "salida", "salidas", "orders", "order_count", "销量", "销售量",
+}
+
+
+def yome_inventory_remote_enabled() -> bool:
+    return bool((os.getenv("YOME_INVENTORY_API_URL") or "").strip())
+
+
+def yome_inventory_search_query(message: str) -> str:
+    low = norm(message)
+    if not low:
+        return ""
+
+    stop_words = {
+        "que", "qué", "cual", "cuál", "cuanto", "cuanta", "cuantos", "cuantas",
+        "hay", "tiene", "tienen", "tenemos", "quiero", "ver", "mostrar", "muestra",
+        "mandame", "mándame", "mercancia", "mercancía", "mercancias", "mercancías",
+        "producto", "productos", "catalogo", "catálogo", "inventario", "stock",
+        "existencia", "disponible", "disponibles", "nuevo", "nueva", "nuevos",
+        "nuevas", "ventas", "vendido", "vendidos", "sales", "sold", "de", "del",
+        "la", "el", "los", "las", "un", "una", "por", "favor", "yome",
+    }
+    chinese_general = ["库存", "商品", "产品", "新品", "新货", "目录", "有什么", "销量", "销售", "这个", "那个", "多少", "还有", "货"]
+    for word in chinese_general:
+        low = low.replace(word, " ")
+
+    terms = []
+    for token in re.split("[^a-z0-9\u4e00-\u9fff]+", low):
+        token = token.strip()
+        if len(token) < 2 or token in stop_words or token.isdigit():
+            continue
+        terms.append(token)
+    return " ".join(terms[:4])
+
+
+def yome_inventory_extract_body_items(body: Any, include_sales: bool = False, limit: int = 12) -> List[Dict[str, Any]]:
+    if isinstance(body, list):
+        raw_items = body
+    elif isinstance(body, dict):
+        raw_items = []
+        for key in ["items", "products", "data", "rows", "inventory"]:
+            value = body.get(key)
+            if isinstance(value, list):
+                raw_items = value
+                break
+    else:
+        raw_items = []
+
+    items: List[Dict[str, Any]] = []
+    for raw in raw_items[:max(1, min(50, int(limit or 12)))]:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        if not include_sales:
+            item = {k: v for k, v in item.items() if norm(k) not in YOME_INVENTORY_SALES_KEYS}
+        items.append(item)
+    return items
+
+
+def yome_remote_inventory_context(message: str, can_view_inventory_sales: bool = False, limit: int = 12) -> Dict[str, Any]:
+    api_url = (os.getenv("YOME_INVENTORY_API_URL") or "").strip()
+    if not api_url:
+        return {"enabled": False, "queried": False, "items": []}
+
+    query = yome_inventory_search_query(message)
+    params = {
+        "limit": str(max(1, min(50, int(limit or 12)))),
+        "_yome_live": str(int(time.time())),
+    }
+    if query:
+        params["q"] = query
+
+    separator = "&" if urllib.parse.urlparse(api_url).query else "?"
+    url = api_url + separator + urllib.parse.urlencode(params)
+    headers = {
+        "Accept": "application/json",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "User-Agent": "YOME-AI-Inventory-Sync/1.0",
+    }
+
+    api_key = (os.getenv("YOME_INVENTORY_API_KEY") or "").strip()
+    if api_key:
+        headers["X-YOME-Inventory-Key"] = api_key
+        headers["Authorization"] = "Bearer " + api_key
+
+    username = (os.getenv("YOME_INVENTORY_USERNAME") or "").strip()
+    password = (os.getenv("YOME_INVENTORY_PASSWORD") or "").strip()
+    if username or password:
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = "Basic " + token
+
+    timeout_raw = (os.getenv("YOME_INVENTORY_TIMEOUT") or "12").strip()
+    try:
+        timeout = max(3, min(30, int(timeout_raw)))
+    except Exception:
+        timeout = 12
+
+    try:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            status = int(getattr(res, "status", 200))
+            raw_body = res.read(1024 * 1024)
+        body = json.loads(raw_body.decode("utf-8-sig", errors="replace"))
+        if status < 200 or status >= 300:
+            raise ValueError(f"inventory_status_{status}")
+    except Exception as exc:
+        print("[YOME INVENTORY SYNC] remote fetch failed:", exc)
+        return {
+            "enabled": True,
+            "queried": True,
+            "query": message,
+            "search": query,
+            "source": "remote_inventory_api",
+            "live": True,
+            "error": str(exc),
+            "items": [],
+        }
+
+    return {
+        "enabled": True,
+        "queried": True,
+        "query": message,
+        "search": query,
+        "source": "remote_inventory_api",
+        "live": True,
+        "fetched_at": datetime.utcnow().isoformat() + "Z",
+        "can_view_inventory_sales": bool(can_view_inventory_sales),
+        "items": yome_inventory_extract_body_items(body, can_view_inventory_sales, limit),
+    }
+
+
 def extract_choice_and_qty(text: str, total_options: int) -> Tuple[int, int]:
     low = norm(text)
     option = 0
@@ -1586,7 +1721,20 @@ def site_chat():
             "source": "yome_inventory",
         })
 
-    if site_chat_needs_live_inventory(message, payload, inventory_context):
+    needs_live_inventory = site_chat_needs_live_inventory(message, payload, inventory_context)
+    if needs_live_inventory and yome_inventory_remote_enabled():
+        remote_inventory_context = yome_remote_inventory_context(message, can_view_inventory_sales)
+        remote_inventory_reply = yome_inventory_reply(message, remote_inventory_context, can_view_inventory_sales)
+        if remote_inventory_reply:
+            return site_chat_json({
+                "status": "ok",
+                "reply": remote_inventory_reply,
+                "assistant": "YOME",
+                "source": "remote_yome_inventory",
+            })
+        inventory_context = remote_inventory_context
+
+    if needs_live_inventory:
         return site_chat_json({
             "status": "ok",
             "reply": site_chat_live_inventory_unavailable_reply(inventory_context),
@@ -1619,6 +1767,59 @@ def site_chat():
         "status": "ok",
         "reply": reply,
         "assistant": "YOME",
+    })
+
+
+def yome_inventory_check_authorized() -> bool:
+    expected = (os.getenv("YOME_INVENTORY_CHECK_KEY") or os.getenv("YOME_SITE_WIDGET_KEY") or "").strip()
+    if not expected:
+        return not yome_inventory_remote_enabled()
+    sent = (
+        request.args.get("key")
+        or request.headers.get("X-YOME-Inventory-Check-Key")
+        or request.headers.get("X-YOME-Widget-Key")
+        or ""
+    ).strip()
+    return bool(sent) and sent == expected
+
+
+@app.get("/yome-inventory-check")
+def yome_inventory_check():
+    if not yome_inventory_check_authorized():
+        return jsonify({
+            "ok": False,
+            "error": "forbidden",
+            "message": "Set YOME_INVENTORY_CHECK_KEY or pass the site widget key to view inventory sync status.",
+        }), 403
+
+    if not yome_inventory_remote_enabled():
+        return jsonify({
+            "ok": False,
+            "configured": False,
+            "message": "YOME_INVENTORY_API_URL is not configured on Railway.",
+        })
+
+    limit = request.args.get("limit", "12")
+    try:
+        limit_int = max(1, min(50, int(limit)))
+    except Exception:
+        limit_int = 12
+    can_view_sales = request.args.get("sales") in {"1", "yes", "true"}
+    message = request.args.get("q") or "que mercancia hay"
+    context = yome_remote_inventory_context(message, can_view_sales, limit_int)
+    items = yome_inventory_items(context)
+
+    return jsonify({
+        "ok": not bool(context.get("error")),
+        "configured": True,
+        "source": context.get("source"),
+        "query": context.get("query"),
+        "search": context.get("search"),
+        "live": context.get("live"),
+        "fetched_at": context.get("fetched_at"),
+        "error": context.get("error"),
+        "count": len(items),
+        "items": items[:limit_int],
     })
 
 
@@ -3525,6 +3726,7 @@ def yome_safe_admin_center_v1():
         ("付款后台 / Payment", "/payment-dashboard", "付款截图和付款记录"),
         ("最新产品 / Latest Products", "/latest-products", "查看最新产品"),
         ("产品同步检查", "/product-sync-check", "如果存在，用来检查 products.csv 和 /data/products.csv"),
+        ("YOME 仓库同步检查", "/yome-inventory-check", "配置 YOME_INVENTORY_API_URL 后检查实时库存 API"),
         ("人工客服链接检查", "/human-support-link-check", "如果存在，用来检查人工客服链接"),
         ("AI 检查", "/ai-check", "如果存在，用来检查 AI 开关"),
         ("收到消息日志", "/debug/incoming-log", "如果存在，用来查看客户消息有没有进来"),

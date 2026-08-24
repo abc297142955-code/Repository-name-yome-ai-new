@@ -42,6 +42,16 @@ Recommended variables:
   - Shared secret used by the WordPress plugin when calling `/site-chat`.
 - `YOME_SITE_ALLOWED_ORIGIN`
   - Optional CORS origin, for example `https://yome.it.com`.
+- `YOME_INVENTORY_API_URL`
+  - Optional Railway-side live inventory source. Use
+    `https://yome.it.com/wp-json/yome-assistant/v1/inventory` after the
+    WordPress plugin is active.
+- `YOME_INVENTORY_API_KEY`
+  - Optional key sent as `X-YOME-Inventory-Key` and `Bearer` authorization when
+    Railway pulls live YOME inventory.
+- `YOME_INVENTORY_CHECK_KEY`
+  - Optional key for `/yome-inventory-check`. If omitted, the site widget key is
+    used for this check page.
 
 WordPress install
 -----------------
@@ -100,3 +110,7 @@ Membership behavior
   `data`, `rows`, or `inventory`. Supported item fields include `name`,
   `product_name`, `sku`, `code`, `stock`, `quantity`, `store`, `price`,
   `member_price`, `image`, and `url`.
+- Railway can also pull YOME inventory directly when `YOME_INVENTORY_API_URL` is
+  configured. Use `/yome-inventory-check?key=YOUR_CHECK_KEY` to confirm how many
+  live products and quantities Railway can read. The assistant still avoids the
+  old `products.csv` stock when live inventory is missing.
