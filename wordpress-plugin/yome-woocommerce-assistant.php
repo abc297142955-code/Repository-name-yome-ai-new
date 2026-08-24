@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.1
+ * Version: 1.0.2
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -19,6 +19,7 @@ final class YOME_WooCommerce_Assistant {
     public static function init(): void {
         add_action('init', [__CLASS__, 'register_account_endpoint']);
         add_action('admin_menu', [__CLASS__, 'admin_menu']);
+        add_action('rest_api_init', [__CLASS__, 'register_inventory_api']);
         add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_widget']);
         add_action('wp_footer', [__CLASS__, 'render_widget']);
         add_action('wp_ajax_yome_assistant_chat', [__CLASS__, 'ajax_chat']);
@@ -174,7 +175,8 @@ final class YOME_WooCommerce_Assistant {
                         <td>
                             <input name="inventory_api_url" id="inventory_api_url" type="url" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_api_url']); ?>" />
-                            <p class="description">The YOME · INVENTARIO endpoint that returns JSON products/stock. It can receive q and limit query parameters.</p>
+                            <p class="description">Optional. Leave blank to read live inventory from this WordPress database automatically. If using an external endpoint, it can receive q and limit query parameters.</p>
+                            <p class="description">Built-in API after activation: <code><?php echo esc_html(rest_url('yome-assistant/v1/inventory')); ?></code></p>
                         </td>
                     </tr>
                     <tr>
@@ -401,8 +403,91 @@ final class YOME_WooCommerce_Assistant {
         ]);
     }
 
+    public static function register_inventory_api(): void {
+        register_rest_route('yome-assistant/v1', '/inventory', [
+            'methods' => 'GET',
+            'callback' => [__CLASS__, 'rest_inventory'],
+            'permission_callback' => [__CLASS__, 'rest_inventory_permission'],
+            'args' => [
+                'q' => [
+                    'required' => false,
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
+                'limit' => [
+                    'required' => false,
+                    'sanitize_callback' => 'absint',
+                ],
+            ],
+        ]);
+
+        register_rest_route('yome-assistant/v1', '/inventory-debug', [
+            'methods' => 'GET',
+            'callback' => [__CLASS__, 'rest_inventory_debug'],
+            'permission_callback' => static function () {
+                return current_user_can('manage_options');
+            },
+        ]);
+    }
+
+    public static function rest_inventory_permission($request): bool {
+        if (current_user_can('manage_woocommerce') || current_user_can('manage_options')) {
+            return true;
+        }
+
+        $options = self::options();
+        $key = trim((string) ($options['inventory_api_key'] ?? ''));
+        if ($key === '') {
+            return false;
+        }
+
+        $sent_key = trim((string) $request->get_header('x-yome-inventory-key'));
+        if (hash_equals($key, $sent_key)) {
+            return true;
+        }
+
+        $auth = trim((string) $request->get_header('authorization'));
+        if (stripos($auth, 'Bearer ') === 0 && hash_equals($key, trim(substr($auth, 7)))) {
+            return true;
+        }
+
+        return false;
+    }
+
+    public static function rest_inventory($request) {
+        $q = sanitize_text_field((string) $request->get_param('q'));
+        $limit = absint($request->get_param('limit'));
+        if ($limit < 1 || $limit > 50) {
+            $limit = 12;
+        }
+
+        return rest_ensure_response([
+            'items' => self::local_inventory_items($q, $limit),
+            'source' => 'yome_assistant_local_inventory',
+            'live' => true,
+            'fetched_at' => gmdate('c'),
+        ]);
+    }
+
+    public static function rest_inventory_debug() {
+        $tables = [];
+        foreach (self::inventory_candidate_tables() as $table) {
+            $columns = self::table_columns($table);
+            $tables[] = [
+                'table' => $table,
+                'columns' => $columns,
+                'map' => self::inventory_column_map($columns),
+            ];
+        }
+
+        return rest_ensure_response([
+            'api' => rest_url('yome-assistant/v1/inventory'),
+            'debug' => rest_url('yome-assistant/v1/inventory-debug'),
+            'tables' => $tables,
+        ]);
+    }
+
     private static function yome_inventory_context(string $message, array $options): array {
-        if (($options['inventory_enabled'] ?? 'no') !== 'yes' || empty($options['inventory_api_url'])) {
+        if (($options['inventory_enabled'] ?? 'no') !== 'yes') {
             return ['enabled' => false, 'queried' => false, 'items' => []];
         }
 
@@ -412,6 +497,10 @@ final class YOME_WooCommerce_Assistant {
 
         if (!$inventory_intent && $search === '') {
             return ['enabled' => true, 'queried' => false, 'items' => []];
+        }
+
+        if (empty($options['inventory_api_url'])) {
+            return self::local_inventory_context($message, $search);
         }
 
         $url = add_query_arg([
@@ -472,6 +561,230 @@ final class YOME_WooCommerce_Assistant {
             'fetched_at' => gmdate('c'),
             'items' => self::extract_inventory_items($body),
         ];
+    }
+
+    private static function local_inventory_context(string $message, string $search): array {
+        return [
+            'enabled' => true,
+            'queried' => true,
+            'query' => $message,
+            'search' => $search,
+            'source' => 'local_wordpress_database',
+            'live' => true,
+            'fetched_at' => gmdate('c'),
+            'items' => self::local_inventory_items($search !== '' ? $search : $message, 12),
+        ];
+    }
+
+    private static function local_inventory_items(string $search = '', int $limit = 12): array {
+        global $wpdb;
+
+        if (empty($wpdb)) {
+            return [];
+        }
+
+        $limit = max(1, min(50, absint($limit)));
+        $items = [];
+        foreach (self::inventory_candidate_tables() as $table) {
+            $columns = self::table_columns($table);
+            if (!$columns) {
+                continue;
+            }
+
+            $map = self::inventory_column_map($columns);
+            if (empty($map['name']) && empty($map['code'])) {
+                continue;
+            }
+            if (empty($map['stock']) && empty($map['price']) && empty($map['member_price'])) {
+                continue;
+            }
+
+            $rows = self::query_inventory_table($table, $columns, $map, $search, $limit - count($items));
+            foreach ($rows as $row) {
+                $items[] = $row;
+                if (count($items) >= $limit) {
+                    break 2;
+                }
+            }
+        }
+
+        return $items;
+    }
+
+    private static function inventory_candidate_tables(): array {
+        global $wpdb;
+
+        $tables = $wpdb->get_col('SHOW TABLES');
+        if (!is_array($tables)) {
+            return [];
+        }
+
+        $scored = [];
+        foreach ($tables as $table) {
+            $score = self::inventory_table_score((string) $table);
+            if ($score > 0) {
+                $scored[] = ['table' => (string) $table, 'score' => $score];
+            }
+        }
+
+        usort($scored, static function ($a, $b) {
+            return $b['score'] <=> $a['score'];
+        });
+
+        return array_map(static function ($row) {
+            return $row['table'];
+        }, $scored);
+    }
+
+    private static function inventory_table_score(string $table): int {
+        $name = strtolower($table);
+        $blocked = [
+            'actionscheduler', 'comment', 'links', 'options', 'postmeta', 'posts',
+            'term', 'usermeta', 'users', 'woocommerce_sessions',
+        ];
+        foreach ($blocked as $word) {
+            if (strpos($name, $word) !== false) {
+                return 0;
+            }
+        }
+
+        $score = 0;
+        foreach (['yome' => 50, 'invent' => 45, 'stock' => 35, 'warehouse' => 25, 'almacen' => 25, 'tienda' => 25, 'store' => 15] as $word => $points) {
+            if (strpos($name, $word) !== false) {
+                $score += $points;
+            }
+        }
+
+        return $score;
+    }
+
+    private static function table_columns(string $table): array {
+        global $wpdb;
+
+        $rows = $wpdb->get_results('DESCRIBE ' . self::sql_ident($table), ARRAY_A);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $columns = [];
+        foreach ($rows as $row) {
+            if (!empty($row['Field'])) {
+                $columns[] = (string) $row['Field'];
+            }
+        }
+        return $columns;
+    }
+
+    private static function inventory_column_map(array $columns): array {
+        $aliases = [
+            'name' => ['name', 'productname', 'nombre', 'nombredelproducto', 'producto', 'title', 'itemname', 'descripcion', 'description'],
+            'code' => ['code', 'sku', 'codigo', 'codigobarra', 'barcode', 'barcodeid', 'productcode', 'referencia', 'ref'],
+            'category' => ['category', 'categoria', 'tipo', 'class'],
+            'stock' => ['stock', 'qty', 'quantity', 'cantidad', 'existencia', 'available', 'disponible', 'inventario', 'onhand', 'saldo'],
+            'store' => ['store', 'branch', 'location', 'warehouse', 'tienda', 'almacen', 'sucursal', 'ubicacion', 'bodega'],
+            'price' => ['price', 'regularprice', 'precio', 'precioregular', 'venta', 'priceretail', 'retail'],
+            'member_price' => ['memberprice', 'pricewholesale', 'preciomiembro', 'preciomayor', 'mayor', 'wholesale', 'membershipprice', 'miembro'],
+            'image' => ['image', 'imageurl', 'photo', 'foto', 'thumbnail', 'imagen', 'imageurls'],
+            'url' => ['url', 'link', 'permalink'],
+            'updated_at' => ['updatedat', 'createdat', 'date', 'fecha', 'modified', 'updated'],
+        ];
+
+        $normalized = [];
+        foreach ($columns as $column) {
+            $normalized[$column] = self::normalize_column_key($column);
+        }
+
+        $map = [];
+        foreach ($aliases as $field => $field_aliases) {
+            $map[$field] = '';
+            foreach ($normalized as $column => $key) {
+                if (in_array($key, $field_aliases, true)) {
+                    $map[$field] = $column;
+                    break;
+                }
+            }
+            if ($map[$field] !== '') {
+                continue;
+            }
+            foreach ($normalized as $column => $key) {
+                foreach ($field_aliases as $alias) {
+                    if (strpos($key, $alias) !== false) {
+                        $map[$field] = $column;
+                        break 2;
+                    }
+                }
+            }
+        }
+
+        return $map;
+    }
+
+    private static function query_inventory_table(string $table, array $columns, array $map, string $search, int $limit): array {
+        global $wpdb;
+
+        if ($limit < 1) {
+            return [];
+        }
+
+        $select = [];
+        foreach (['name', 'code', 'category', 'stock', 'store', 'price', 'member_price', 'image', 'url', 'updated_at'] as $field) {
+            if (!empty($map[$field]) && in_array($map[$field], $columns, true)) {
+                $select[] = self::sql_ident($map[$field]) . ' AS ' . self::sql_ident($field);
+            }
+        }
+        if (!$select) {
+            return [];
+        }
+
+        $where = '';
+        $args = [];
+        $search = trim($search);
+        if ($search !== '') {
+            $where_parts = [];
+            foreach (array_unique(array_filter([$map['name'] ?? '', $map['code'] ?? '', $map['category'] ?? ''])) as $column) {
+                if (in_array($column, $columns, true)) {
+                    $where_parts[] = self::sql_ident($column) . ' LIKE %s';
+                    $args[] = '%' . $wpdb->esc_like($search) . '%';
+                }
+            }
+            if ($where_parts) {
+                $where = ' WHERE ' . implode(' OR ', $where_parts);
+            }
+        }
+
+        $order = '';
+        if (!empty($map['updated_at']) && in_array($map['updated_at'], $columns, true)) {
+            $order = ' ORDER BY ' . self::sql_ident($map['updated_at']) . ' DESC';
+        }
+
+        $sql = 'SELECT ' . implode(', ', $select) . ' FROM ' . self::sql_ident($table) . $where . $order . ' LIMIT %d';
+        $args[] = $limit;
+        $prepared = $wpdb->prepare($sql, $args);
+        $rows = $wpdb->get_results($prepared, ARRAY_A);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $items = [];
+        foreach ($rows as $row) {
+            $item = [];
+            foreach (['name', 'code', 'category', 'stock', 'store', 'price', 'member_price', 'image', 'url', 'updated_at'] as $field) {
+                $item[$field] = isset($row[$field]) && is_scalar($row[$field]) ? (string) $row[$field] : '';
+            }
+            if (implode('', $item) !== '') {
+                $items[] = $item;
+            }
+        }
+        return $items;
+    }
+
+    private static function sql_ident(string $identifier): string {
+        return '`' . str_replace('`', '``', $identifier) . '`';
+    }
+
+    private static function normalize_column_key(string $text): string {
+        $text = strtolower(remove_accents($text));
+        return (string) preg_replace('/[^a-z0-9]+/', '', $text);
     }
 
     private static function extract_inventory_items(array $body): array {
