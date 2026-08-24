@@ -21,9 +21,8 @@ Files
     `/wp-json/yome-assistant/v1/inventory` and can auto-read likely YOME
     inventory tables from the same WordPress database when **Inventory API URL**
     is left blank.
-  - If no separate YOME inventory table is found, it falls back to live
-    WooCommerce/member-system product inventory. It does not use the POS/caja
-    catalog route.
+  - Uses **YOME · INVENTARIO** warehouse tables only. It does not fall back to
+    WooCommerce/member-system product data or the POS/caja catalog route.
   - The settings page shows an admin-only inventory preview, so admins can test
     live inventory without opening the protected REST API directly.
   - Admins and WooCommerce managers can ask for product stock and sales. Sales
@@ -68,9 +67,9 @@ WordPress install
    `https://repository-name-yome-ai-new-production.up.railway.app/site-chat`
 5. Set **Widget key** to the same value as `YOME_SITE_WIDGET_KEY`.
 6. Enable **YOME · INVENTARIO**. Leave **Inventory API URL** blank to let the
-   plugin auto-read live inventory tables from the same WordPress database. If
-   no separate inventory table is found, it will read WooCommerce/member-system
-   product inventory live.
+   plugin auto-read real YOME warehouse tables from the same WordPress database.
+   If the correct table is not auto-detected, fill **YOME inventory table** with
+   the real warehouse table shown in the settings preview candidates.
 7. Optional: use the built-in API URL
    `https://yome.it.com/wp-json/yome-assistant/v1/inventory` for testing after
    the plugin is active. It accepts `q` and `limit`.
@@ -98,11 +97,11 @@ Membership behavior
   or a specific product name, WordPress queries **YOME · INVENTARIO** and sends
   product/stock data to the AI.
 - If **Inventory API URL** is blank, the plugin scans likely custom inventory
-  tables such as names containing `yome`, `invent`, `stock`, `tienda`, or
-  `almacen`, maps product fields, and sends the latest rows to the AI.
-- If those tables are not found, the plugin reads WooCommerce/member-system
-  products directly with `wc_get_products` and product stock fields. It does not
-  use the WooCommerce POS/caja catalog route.
+  tables and inventory-like columns such as `producto`, `cantidad`,
+  `existencia`, `stock`, `precio`, `salida`, `tienda`, or `almacen`, maps
+  product fields, and sends the latest rows to the AI.
+- If no real YOME warehouse table is found, the chat will say live inventory is
+  not connected instead of using WooCommerce/member-system products.
 - Admin/staff questions such as `cuanto stock tiene mochila`, `ventas mochila`,
   or `这个货有多少销量` can include `Stock` and `Ventas registradas`. Regular
   members do not receive sales totals.

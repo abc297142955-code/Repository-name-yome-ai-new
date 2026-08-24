@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.5
+ * Version: 1.0.6
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -79,6 +79,7 @@ final class YOME_WooCommerce_Assistant {
             'inventory_api_key' => '',
             'inventory_username' => '',
             'inventory_password' => '',
+            'inventory_table' => '',
             'display_scope' => 'account',
             'enabled' => 'yes',
         ];
@@ -116,6 +117,7 @@ final class YOME_WooCommerce_Assistant {
             $inventory_api_key = sanitize_text_field(wp_unslash($_POST['inventory_api_key'] ?? ''));
             $inventory_username = sanitize_text_field(wp_unslash($_POST['inventory_username'] ?? ''));
             $inventory_password = sanitize_text_field(wp_unslash($_POST['inventory_password'] ?? ''));
+            $inventory_table = sanitize_text_field(wp_unslash($_POST['inventory_table'] ?? ''));
             $display_scope = sanitize_key(wp_unslash($_POST['display_scope'] ?? 'account'));
             $enabled = !empty($_POST['enabled']) ? 'yes' : 'no';
 
@@ -131,6 +133,7 @@ final class YOME_WooCommerce_Assistant {
                 'inventory_api_key' => $inventory_api_key,
                 'inventory_username' => $inventory_username,
                 'inventory_password' => $inventory_password,
+                'inventory_table' => $inventory_table,
                 'display_scope' => $display_scope,
                 'enabled' => $enabled,
             ];
@@ -175,7 +178,7 @@ final class YOME_WooCommerce_Assistant {
                         <td>
                             <input name="inventory_api_url" id="inventory_api_url" type="url" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_api_url']); ?>" />
-                            <p class="description">Leave blank to read live inventory from this WordPress/member system automatically. Do not paste the built-in API here; it is only for testing or external tools.</p>
+                            <p class="description">Leave blank to auto-detect the real YOME warehouse tables in WordPress. Do not paste the built-in API here; it is only for testing or external tools.</p>
                             <p class="description">Built-in API after activation: <code><?php echo esc_html(rest_url('yome-assistant/v1/inventory')); ?></code></p>
                         </td>
                     </tr>
@@ -201,6 +204,14 @@ final class YOME_WooCommerce_Assistant {
                             <input name="inventory_password" id="inventory_password" type="password" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_password']); ?>" autocomplete="new-password" />
                             <p class="description">Optional. Sent with Inventory username as Basic authorization.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="inventory_table">YOME inventory table</label></th>
+                        <td>
+                            <input name="inventory_table" id="inventory_table" type="text" class="regular-text"
+                                   value="<?php echo esc_attr($options['inventory_table']); ?>" autocomplete="off" />
+                            <p class="description">Optional. Use only the real YOME warehouse table. Leave blank for auto-detect. WooCommerce/member products are not used as fallback.</p>
                         </td>
                     </tr>
                     <tr>
@@ -254,7 +265,7 @@ final class YOME_WooCommerce_Assistant {
     private static function settings_inventory_preview(array $options): void {
         if (($options['inventory_enabled'] ?? 'no') !== 'yes') {
             echo '<h2>Inventory preview</h2>';
-            echo '<p>Turn on YOME · INVENTARIO and save to preview live member inventory here.</p>';
+            echo '<p>Turn on YOME · INVENTARIO and save to preview the real YOME warehouse inventory here.</p>';
             return;
         }
 
@@ -264,12 +275,14 @@ final class YOME_WooCommerce_Assistant {
         echo '<h2>Inventory preview</h2>';
         echo '<p><strong>Source:</strong> ' . esc_html((string) ($context['source'] ?? 'configured inventory')) . '</p>';
         echo '<p><strong>Items:</strong> ' . esc_html((string) count($items)) . '</p>';
+        echo '<p><strong>Mode:</strong> YOME warehouse only. WooCommerce/member product fallback is disabled.</p>';
         if (!empty($context['error'])) {
             echo '<p><strong>Error:</strong> ' . esc_html((string) $context['error']) . '</p>';
         }
 
         if (!$items) {
-            echo '<p>No inventory rows found yet. The chat will not use old CSV stock.</p>';
+            echo '<p>No real YOME warehouse rows found yet. The chat will not use WooCommerce/member products or old CSV stock.</p>';
+            self::settings_inventory_candidates_preview($options);
             return;
         }
 
@@ -284,6 +297,33 @@ final class YOME_WooCommerce_Assistant {
             echo '<td>' . esc_html((string) ($item['price'] ?? '')) . '</td>';
             echo '<td>' . esc_html((string) ($item['member_price'] ?? '')) . '</td>';
             echo '<td>' . esc_html((string) ($item['store'] ?? '')) . '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+        self::settings_inventory_candidates_preview($options);
+    }
+
+    private static function settings_inventory_candidates_preview(array $options): void {
+        $rows = self::inventory_candidate_table_debug((string) ($options['inventory_table'] ?? ''));
+        echo '<h3>YOME warehouse table candidates</h3>';
+        if (!$rows) {
+            echo '<p>No likely YOME warehouse tables detected yet.</p>';
+            return;
+        }
+
+        echo '<table class="widefat striped" style="max-width:1000px">';
+        echo '<thead><tr><th>Table</th><th>Score</th><th>Name</th><th>Code</th><th>Stock</th><th>Price</th><th>Sales</th><th>Columns</th></tr></thead><tbody>';
+        foreach (array_slice($rows, 0, 12) as $row) {
+            $map = is_array($row['map'] ?? null) ? $row['map'] : [];
+            echo '<tr>';
+            echo '<td><code>' . esc_html((string) ($row['table'] ?? '')) . '</code></td>';
+            echo '<td>' . esc_html((string) ($row['score'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($map['name'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($map['code'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($map['stock'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($map['price'] ?? '')) . '</td>';
+            echo '<td>' . esc_html((string) ($map['sales'] ?? '')) . '</td>';
+            echo '<td>' . esc_html(implode(', ', array_slice((array) ($row['columns'] ?? []), 0, 10))) . '</td>';
             echo '</tr>';
         }
         echo '</tbody></table>';
@@ -519,11 +559,12 @@ final class YOME_WooCommerce_Assistant {
             $limit = 12;
         }
 
+        $options = self::options();
         $can_view_inventory_sales = self::can_view_inventory_sales();
 
         return rest_ensure_response([
-            'items' => self::local_inventory_items($q, $limit, $can_view_inventory_sales),
-            'source' => 'yome_assistant_local_inventory',
+            'items' => self::local_inventory_items($q, $limit, $can_view_inventory_sales, (string) ($options['inventory_table'] ?? '')),
+            'source' => 'yome_warehouse_database',
             'can_view_inventory_sales' => $can_view_inventory_sales,
             'live' => true,
             'fetched_at' => gmdate('c'),
@@ -531,23 +572,14 @@ final class YOME_WooCommerce_Assistant {
     }
 
     public static function rest_inventory_debug() {
-        $tables = [];
-        foreach (self::inventory_candidate_tables() as $table) {
-            $columns = self::table_columns($table);
-            $tables[] = [
-                'table' => $table,
-                'columns' => $columns,
-                'map' => self::inventory_column_map($columns),
-            ];
-        }
+        $options = self::options();
+        $tables = self::inventory_candidate_table_debug((string) ($options['inventory_table'] ?? ''));
 
         return rest_ensure_response([
             'api' => rest_url('yome-assistant/v1/inventory'),
             'debug' => rest_url('yome-assistant/v1/inventory-debug'),
-            'woocommerce_member_inventory' => [
-                'available' => function_exists('wc_get_products'),
-                'sample' => self::woocommerce_inventory_items('', 3, true),
-            ],
+            'mode' => 'yome_warehouse_only',
+            'woocommerce_fallback' => false,
             'tables' => $tables,
         ]);
     }
@@ -568,7 +600,7 @@ final class YOME_WooCommerce_Assistant {
 
         $inventory_api_url = trim((string) ($options['inventory_api_url'] ?? ''));
         if ($inventory_api_url === '' || self::is_builtin_inventory_api_url($inventory_api_url)) {
-            return self::local_inventory_context($message, $search, $can_view_inventory_sales);
+            return self::local_inventory_context($message, $search, $can_view_inventory_sales, $options);
         }
 
         $url = add_query_arg([
@@ -632,17 +664,17 @@ final class YOME_WooCommerce_Assistant {
         ];
     }
 
-    private static function local_inventory_context(string $message, string $search, bool $can_view_inventory_sales): array {
+    private static function local_inventory_context(string $message, string $search, bool $can_view_inventory_sales, array $options): array {
         return [
             'enabled' => true,
             'queried' => true,
             'query' => $message,
             'search' => $search,
-            'source' => 'local_wordpress_database',
+            'source' => 'yome_warehouse_database',
             'can_view_inventory_sales' => $can_view_inventory_sales,
             'live' => true,
             'fetched_at' => gmdate('c'),
-            'items' => self::local_inventory_items($search, 12, $can_view_inventory_sales),
+            'items' => self::local_inventory_items($search, 12, $can_view_inventory_sales, (string) ($options['inventory_table'] ?? '')),
         ];
     }
 
@@ -664,7 +696,7 @@ final class YOME_WooCommerce_Assistant {
         return false;
     }
 
-    private static function local_inventory_items(string $search = '', int $limit = 12, bool $include_sales = false): array {
+    private static function local_inventory_items(string $search = '', int $limit = 12, bool $include_sales = false, string $preferred_table = ''): array {
         global $wpdb;
 
         if (empty($wpdb)) {
@@ -673,7 +705,7 @@ final class YOME_WooCommerce_Assistant {
 
         $limit = max(1, min(50, absint($limit)));
         $items = [];
-        foreach (self::inventory_candidate_tables() as $table) {
+        foreach (self::inventory_candidate_tables($preferred_table) as $table) {
             $columns = self::table_columns($table);
             if (!$columns) {
                 continue;
@@ -696,207 +728,16 @@ final class YOME_WooCommerce_Assistant {
             }
         }
 
-        if (count($items) < $limit) {
-            $seen = [];
-            foreach ($items as $item) {
-                $key = strtolower(($item['code'] ?? '') . '|' . ($item['name'] ?? ''));
-                $seen[$key] = true;
-            }
-
-            foreach (self::woocommerce_inventory_items($search, $limit - count($items), $include_sales) as $item) {
-                $key = strtolower(($item['code'] ?? '') . '|' . ($item['name'] ?? ''));
-                if (isset($seen[$key])) {
-                    continue;
-                }
-                $items[] = $item;
-                $seen[$key] = true;
-                if (count($items) >= $limit) {
-                    break;
-                }
-            }
-        }
-
         return $items;
     }
 
-    private static function woocommerce_inventory_items(string $search = '', int $limit = 12, bool $include_sales = false): array {
-        if (!function_exists('wc_get_product') || !function_exists('wc_get_products')) {
-            return [];
-        }
-
-        $limit = max(1, min(50, absint($limit)));
-        $products = self::woocommerce_products_for_inventory($search, $limit);
-        $items = [];
-
-        foreach ($products as $product) {
-            if (!is_object($product) || !method_exists($product, 'get_id')) {
-                continue;
-            }
-
-            $stock_qty = method_exists($product, 'get_stock_quantity') ? $product->get_stock_quantity() : null;
-            $stock_status = method_exists($product, 'get_stock_status') ? (string) $product->get_stock_status() : '';
-            $stock_text = $stock_qty !== null ? (string) $stock_qty : self::stock_status_text($stock_status);
-
-            $image = '';
-            if (method_exists($product, 'get_image_id')) {
-                $image_id = (int) $product->get_image_id();
-                if ($image_id > 0) {
-                    $image = (string) wp_get_attachment_image_url($image_id, 'medium');
-                }
-            }
-
-            $item = [
-                'name' => method_exists($product, 'get_name') ? (string) $product->get_name() : '',
-                'code' => method_exists($product, 'get_sku') ? (string) $product->get_sku() : '',
-                'category' => self::woocommerce_product_categories((int) $product->get_id()),
-                'stock' => $stock_text,
-                'store' => 'YOME member system',
-                'price' => self::woocommerce_product_price($product),
-                'member_price' => self::woocommerce_member_price($product),
-                'image' => $image,
-                'url' => get_permalink((int) $product->get_id()),
-                'updated_at' => self::woocommerce_product_modified($product),
-                'source' => 'woocommerce_member_system',
-            ];
-            if ($include_sales) {
-                $item['sales'] = self::woocommerce_sales_count($product);
-            }
-            $items[] = $item;
-        }
-
-        return $items;
+    private static function inventory_candidate_tables(string $preferred_table = ''): array {
+        return array_map(static function ($row) {
+            return (string) $row['table'];
+        }, self::inventory_candidate_table_debug($preferred_table));
     }
 
-    private static function woocommerce_products_for_inventory(string $search, int $limit): array {
-        global $wpdb;
-
-        $search = trim($search);
-        if ($search !== '' && !empty($wpdb)) {
-            $like = '%' . $wpdb->esc_like($search) . '%';
-            $sql = "
-                SELECT DISTINCT p.ID
-                FROM {$wpdb->posts} p
-                LEFT JOIN {$wpdb->postmeta} sku ON sku.post_id = p.ID AND sku.meta_key = '_sku'
-                WHERE p.post_type = 'product'
-                  AND p.post_status = 'publish'
-                  AND (p.post_title LIKE %s OR sku.meta_value LIKE %s)
-                ORDER BY p.post_modified DESC
-                LIMIT %d
-            ";
-            $ids = $wpdb->get_col($wpdb->prepare($sql, $like, $like, $limit));
-            if (is_array($ids) && $ids) {
-                $products = [];
-                foreach ($ids as $id) {
-                    $product = wc_get_product((int) $id);
-                    if ($product) {
-                        $products[] = $product;
-                    }
-                }
-                return $products;
-            }
-        }
-
-        $args = [
-            'status' => 'publish',
-            'limit' => $limit,
-            'orderby' => 'modified',
-            'order' => 'DESC',
-            'return' => 'objects',
-        ];
-        if ($search !== '') {
-            $args['search'] = '*' . $search . '*';
-        }
-
-        $products = wc_get_products($args);
-        return is_array($products) ? $products : [];
-    }
-
-    private static function stock_status_text(string $stock_status): string {
-        if ($stock_status === 'instock') {
-            return 'Disponible';
-        }
-        if ($stock_status === 'outofstock') {
-            return 'Agotado';
-        }
-        if ($stock_status === 'onbackorder') {
-            return 'Por encargo';
-        }
-        return $stock_status;
-    }
-
-    private static function woocommerce_product_price($product): string {
-        foreach (['get_regular_price', 'get_price'] as $method) {
-            if (method_exists($product, $method)) {
-                $value = (string) $product->{$method}();
-                if ($value !== '') {
-                    return $value;
-                }
-            }
-        }
-        return '';
-    }
-
-    private static function woocommerce_member_price($product): string {
-        if (!is_object($product) || !method_exists($product, 'get_id')) {
-            return '';
-        }
-
-        $id = (int) $product->get_id();
-        $keys = [
-            '_member_price', 'member_price', '_membership_price', 'membership_price',
-            '_price_wholesale', 'price_wholesale', '_wholesale_price', 'wholesale_price',
-            '_precio_miembro', 'precio_miembro', '_precio_mayor', 'precio_mayor',
-            '_mayor', 'mayor',
-        ];
-        foreach ($keys as $key) {
-            $value = get_post_meta($id, $key, true);
-            if (is_scalar($value) && (string) $value !== '') {
-                return (string) $value;
-            }
-        }
-
-        return '';
-    }
-
-    private static function woocommerce_sales_count($product): string {
-        if (!is_object($product) || !method_exists($product, 'get_id')) {
-            return '';
-        }
-
-        if (method_exists($product, 'get_total_sales')) {
-            $value = $product->get_total_sales();
-            if ($value !== null && $value !== '') {
-                return (string) $value;
-            }
-        }
-
-        $value = get_post_meta((int) $product->get_id(), 'total_sales', true);
-        if (is_scalar($value) && (string) $value !== '') {
-            return (string) $value;
-        }
-
-        return '0';
-    }
-
-    private static function woocommerce_product_categories(int $product_id): string {
-        $terms = wp_get_post_terms($product_id, 'product_cat', ['fields' => 'names']);
-        if (!is_array($terms) || is_wp_error($terms)) {
-            return '';
-        }
-        return implode(', ', array_map('strval', $terms));
-    }
-
-    private static function woocommerce_product_modified($product): string {
-        if (is_object($product) && method_exists($product, 'get_date_modified')) {
-            $date = $product->get_date_modified();
-            if (is_object($date) && method_exists($date, 'date')) {
-                return (string) $date->date('c');
-            }
-        }
-        return '';
-    }
-
-    private static function inventory_candidate_tables(): array {
+    private static function inventory_candidate_table_debug(string $preferred_table = ''): array {
         global $wpdb;
 
         $tables = $wpdb->get_col('SHOW TABLES');
@@ -904,11 +745,43 @@ final class YOME_WooCommerce_Assistant {
             return [];
         }
 
+        $preferred_table = trim($preferred_table);
+        $preferred_names = [];
+        if ($preferred_table !== '') {
+            $preferred_names[] = $preferred_table;
+            if (isset($wpdb->prefix) && strpos($preferred_table, (string) $wpdb->prefix) !== 0) {
+                $preferred_names[] = (string) $wpdb->prefix . $preferred_table;
+            }
+        }
+
         $scored = [];
         foreach ($tables as $table) {
-            $score = self::inventory_table_score((string) $table);
-            if ($score > 0) {
-                $scored[] = ['table' => (string) $table, 'score' => $score];
+            $table = (string) $table;
+            $is_preferred = in_array($table, $preferred_names, true);
+            if (!$is_preferred && self::inventory_table_is_blocked($table)) {
+                continue;
+            }
+
+            $columns = self::table_columns($table);
+            if (!$columns) {
+                continue;
+            }
+
+            $map = self::inventory_column_map($columns);
+            $score = self::inventory_table_score($table) + self::inventory_column_score($map, $columns);
+            if ($is_preferred) {
+                $score += 1000;
+            }
+
+            $has_identity = !empty($map['name']) || !empty($map['code']);
+            $has_inventory_data = !empty($map['stock']) || !empty($map['price']) || !empty($map['member_price']) || !empty($map['sales']);
+            if ($is_preferred || ($score >= 40 && $has_identity && $has_inventory_data)) {
+                $scored[] = [
+                    'table' => $table,
+                    'score' => $score,
+                    'columns' => $columns,
+                    'map' => $map,
+                ];
             }
         }
 
@@ -916,27 +789,64 @@ final class YOME_WooCommerce_Assistant {
             return $b['score'] <=> $a['score'];
         });
 
-        return array_map(static function ($row) {
-            return $row['table'];
-        }, $scored);
+        return $scored;
+    }
+
+    private static function inventory_table_is_blocked(string $table): bool {
+        $name = strtolower($table);
+        $blocked = [
+            'actionscheduler', 'comment', 'links', 'options', 'postmeta', 'posts',
+            'term', 'usermeta', 'users', 'woocommerce', 'wc_', 'wc-', '_wc_',
+            'yoast', 'rank_math', 'redirection', 'snippets', 'session', 'queue',
+        ];
+        foreach ($blocked as $word) {
+            if (strpos($name, $word) !== false) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static function inventory_table_score(string $table): int {
         $name = strtolower($table);
-        $blocked = [
-            'actionscheduler', 'comment', 'links', 'options', 'postmeta', 'posts',
-            'term', 'usermeta', 'users', 'woocommerce_sessions',
-        ];
-        foreach ($blocked as $word) {
-            if (strpos($name, $word) !== false) {
-                return 0;
-            }
+        if (self::inventory_table_is_blocked($table)) {
+            return 0;
         }
 
         $score = 0;
-        foreach (['yome' => 50, 'invent' => 45, 'stock' => 35, 'warehouse' => 25, 'almacen' => 25, 'tienda' => 25, 'store' => 15] as $word => $points) {
+        foreach (['yome' => 50, 'invent' => 45, 'stock' => 35, 'warehouse' => 25, 'almacen' => 25, 'bodega' => 25, 'tienda' => 25, 'store' => 15, 'producto' => 15, 'product' => 15] as $word => $points) {
             if (strpos($name, $word) !== false) {
                 $score += $points;
+            }
+        }
+
+        return $score;
+    }
+
+    private static function inventory_column_score(array $map, array $columns): int {
+        $score = 0;
+        foreach ([
+            'name' => 25,
+            'code' => 20,
+            'stock' => 45,
+            'store' => 10,
+            'price' => 15,
+            'member_price' => 10,
+            'sales' => 15,
+            'updated_at' => 5,
+        ] as $field => $points) {
+            if (!empty($map[$field])) {
+                $score += $points;
+            }
+        }
+
+        foreach ($columns as $column) {
+            $key = self::normalize_column_key((string) $column);
+            if (strpos($key, 'inventario') !== false || strpos($key, 'existencia') !== false || strpos($key, 'cantidad') !== false) {
+                $score += 8;
+            }
+            if (strpos($key, 'producto') !== false || strpos($key, 'product') !== false || strpos($key, 'codigo') !== false) {
+                $score += 5;
             }
         }
 
@@ -962,14 +872,14 @@ final class YOME_WooCommerce_Assistant {
 
     private static function inventory_column_map(array $columns): array {
         $aliases = [
-            'name' => ['name', 'productname', 'nombre', 'nombredelproducto', 'producto', 'title', 'itemname', 'descripcion', 'description', '名称', '商品', '产品', '产品名称'],
-            'code' => ['code', 'sku', 'codigo', 'codigobarra', 'barcode', 'barcodeid', 'productcode', 'referencia', 'ref', '编号', '编码', '条码', '货号'],
+            'name' => ['name', 'productname', 'nombre', 'nombreproducto', 'nombredelproducto', 'producto', 'product', 'item', 'itemname', 'articulo', 'artículo', 'descripcion', 'description', 'title', 'concepto', '名称', '商品', '产品', '产品名称'],
+            'code' => ['code', 'sku', 'codigo', 'codigobarra', 'codigodebarra', 'barcode', 'barcodeid', 'productcode', 'idproducto', 'productid', 'referencia', 'ref', 'modelo', 'model', '编号', '编码', '条码', '货号'],
             'category' => ['category', 'categoria', 'tipo', 'class', '分类', '类别'],
-            'stock' => ['stock', 'qty', 'quantity', 'cantidad', 'existencia', 'available', 'disponible', 'inventario', 'onhand', 'saldo', '库存', '数量', '剩余'],
-            'store' => ['store', 'branch', 'location', 'warehouse', 'tienda', 'almacen', 'sucursal', 'ubicacion', 'bodega', '门店', '仓库', '位置'],
-            'price' => ['price', 'regularprice', 'precio', 'precioregular', 'venta', 'priceretail', 'retail', '价格', '售价', '零售价'],
+            'stock' => ['stock', 'qty', 'quantity', 'cantidad', 'existencia', 'existencias', 'available', 'disponible', 'disponibles', 'inventario', 'onhand', 'saldo', 'balance', 'restante', 'quedan', 'actual', 'cantidadactual', 'stockactual', 'inventarioactual', 'piezas', 'pcs', '库存', '数量', '剩余'],
+            'store' => ['store', 'branch', 'location', 'warehouse', 'tienda', 'almacen', 'almacén', 'sucursal', 'ubicacion', 'ubicación', 'bodega', 'deposito', 'depósito', '门店', '仓库', '位置'],
+            'price' => ['price', 'regularprice', 'precio', 'precioregular', 'venta', 'priceretail', 'retail', 'costo', 'cost', '价格', '售价', '零售价'],
             'member_price' => ['memberprice', 'pricewholesale', 'preciomiembro', 'preciomayor', 'mayor', 'wholesale', 'membershipprice', 'miembro', '会员价', '批发价'],
-            'sales' => ['sales', 'totalsales', 'sold', 'soldqty', 'quantitysold', 'vendido', 'vendidos', 'ventas', 'cantidadvendida', 'unidadesvendidas', 'salida', 'salidas', 'orders', 'ordercount', '销量', '销售', '销售量', '卖出', '已售'],
+            'sales' => ['sales', 'totalsales', 'sold', 'soldqty', 'quantitysold', 'vendido', 'vendidos', 'ventas', 'cantidadvendida', 'unidadesvendidas', 'salida', 'salidas', 'egreso', 'egresos', 'orders', 'ordercount', '销量', '销售', '销售量', '卖出', '已售'],
             'image' => ['image', 'imageurl', 'photo', 'foto', 'thumbnail', 'imagen', 'imageurls', '图片', '照片'],
             'url' => ['url', 'link', 'permalink'],
             'updated_at' => ['updatedat', 'createdat', 'date', 'fecha', 'modified', 'updated'],
