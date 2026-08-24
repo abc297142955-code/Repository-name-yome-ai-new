@@ -14,7 +14,9 @@ Files
   - Single-file WordPress plugin.
   - Shows a cartoon YOME assistant on WooCommerce My Account pages by default.
   - Adds a **YOME助手** tab inside WooCommerce My Account for the member page.
-  - Uses an animated YOME robot with hover/bob, blinking eyes, and glowing antenna.
+  - Adds a small animated YOME bunny mascot on the WooCommerce member dashboard
+    with the label `AI YOME`.
+  - Uses the YOME bunny image from `wordpress-plugin/assets/yome-bunny-assistant.png`.
   - Can read the separate **YOME · INVENTARIO** JSON API and send that inventory
     context to the AI.
   - Also exposes a built-in bridge API at
@@ -106,6 +108,8 @@ Membership behavior
   stock/sales checks.
 - Otherwise, it appears for logged-in WordPress/WooCommerce customers.
 - You can also place `[yome_assistant]` on a member-only page.
+- The member dashboard shows a compact animated `AI YOME` bunny icon. Clicking
+  it opens the same chat window.
 - The second product price is shown to customers as the YOME member price.
 - If a customer asks to order an amount such as `RD$7800`, the assistant starts
   an order draft and collects name, delivery zone/address, and payment method.

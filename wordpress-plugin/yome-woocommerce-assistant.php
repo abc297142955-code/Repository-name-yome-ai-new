@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.8
+ * Version: 1.0.9
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -15,6 +15,7 @@ final class YOME_WooCommerce_Assistant {
     private const OPTION_KEY = 'yome_woocommerce_assistant_options';
     private const NONCE_ACTION = 'yome_assistant_chat';
     private static $assets_loaded = false;
+    private static $dashboard_rendered = false;
 
     public static function init(): void {
         add_action('init', [__CLASS__, 'register_account_endpoint']);
@@ -24,6 +25,7 @@ final class YOME_WooCommerce_Assistant {
         add_action('wp_footer', [__CLASS__, 'render_widget']);
         add_action('wp_ajax_yome_assistant_chat', [__CLASS__, 'ajax_chat']);
         add_filter('woocommerce_account_menu_items', [__CLASS__, 'account_menu_items']);
+        add_action('woocommerce_account_dashboard', [__CLASS__, 'account_dashboard_assistant'], 3);
         add_action('woocommerce_account_yome-assistant_endpoint', [__CLASS__, 'account_endpoint_content']);
         add_shortcode('yome_assistant', [__CLASS__, 'shortcode']);
     }
@@ -55,6 +57,20 @@ final class YOME_WooCommerce_Assistant {
         }
 
         return $new_items;
+    }
+
+    public static function account_dashboard_assistant(): void {
+        $options = self::options();
+        if ($options['enabled'] !== 'yes' || !self::user_can_chat()) {
+            return;
+        }
+        if (!in_array($options['display_scope'], ['account', 'site'], true)) {
+            return;
+        }
+
+        self::$dashboard_rendered = true;
+        self::enqueue_widget(true);
+        self::widget_markup('dashboard');
     }
 
     public static function account_endpoint_content(): void {
@@ -387,11 +403,11 @@ final class YOME_WooCommerce_Assistant {
         }
         self::$assets_loaded = true;
 
-        wp_register_style('yome-assistant-widget', false, [], '1.0.0');
+        wp_register_style('yome-assistant-widget', false, [], '1.0.9');
         wp_enqueue_style('yome-assistant-widget');
         wp_add_inline_style('yome-assistant-widget', self::css());
 
-        wp_register_script('yome-assistant-widget', false, [], '1.0.0', true);
+        wp_register_script('yome-assistant-widget', false, [], '1.0.9', true);
         wp_enqueue_script('yome-assistant-widget');
         wp_add_inline_script('yome-assistant-widget', 'window.YOMEAssistantConfig = ' . wp_json_encode([
             'ajaxUrl' => admin_url('admin-ajax.php'),
@@ -406,6 +422,10 @@ final class YOME_WooCommerce_Assistant {
             return;
         }
 
+        if (self::$dashboard_rendered) {
+            return;
+        }
+
         if (function_exists('is_wc_endpoint_url') && is_wc_endpoint_url('yome-assistant')) {
             return;
         }
@@ -414,12 +434,21 @@ final class YOME_WooCommerce_Assistant {
     }
 
     private static function widget_markup(string $mode): void {
-        $class = $mode === 'inline' ? 'yome-assistant yome-assistant-inline' : 'yome-assistant yome-assistant-floating';
+        if ($mode === 'inline') {
+            $class = 'yome-assistant yome-assistant-inline';
+        } elseif ($mode === 'dashboard') {
+            $class = 'yome-assistant yome-assistant-dashboard';
+        } else {
+            $class = 'yome-assistant yome-assistant-floating';
+        }
+        $launcher_label = $mode === 'dashboard' ? 'AI YOME' : 'YOME助手';
         ?>
         <div class="<?php echo esc_attr($class); ?>" data-yome-assistant>
             <button class="yome-assistant-launcher" type="button" aria-label="Open YOME Assistant">
                 <?php self::robot_markup(); ?>
-                <span class="yome-launcher-text">YOME助手</span>
+                <span class="yome-launcher-copy">
+                    <span class="yome-launcher-text"><?php echo esc_html($launcher_label); ?></span>
+                </span>
             </button>
             <section class="yome-chat-panel" aria-live="polite">
                 <div class="yome-chat-head">
@@ -443,18 +472,10 @@ final class YOME_WooCommerce_Assistant {
     }
 
     private static function robot_markup(string $class = ''): void {
-        $classes = trim('yome-robot ' . $class);
+        $classes = trim('yome-bunny-mascot ' . $class);
         ?>
         <span class="<?php echo esc_attr($classes); ?>" aria-hidden="true">
-            <span class="yome-robot-antenna"></span>
-            <span class="yome-robot-head">
-                <span class="yome-eye left"></span>
-                <span class="yome-eye right"></span>
-                <span class="yome-robot-mouth"></span>
-            </span>
-            <span class="yome-robot-body"><span>Y</span></span>
-            <span class="yome-robot-arm left"></span>
-            <span class="yome-robot-arm right"></span>
+            <img src="<?php echo esc_url(plugins_url('assets/yome-bunny-assistant.png', __FILE__)); ?>" alt="" loading="lazy" decoding="async" />
         </span>
         <?php
     }
@@ -1240,21 +1261,21 @@ final class YOME_WooCommerce_Assistant {
 .yome-assistant{--yome-ink:#172033;--yome-blue:#1477d4;--yome-gold:#f2b544;--yome-line:#d9e1ec;font-family:Arial,sans-serif;color:var(--yome-ink)}
 .yome-assistant-floating{position:fixed;right:18px;bottom:18px;z-index:99999}
 .yome-assistant-inline{max-width:390px;margin:18px 0}
+.yome-assistant-dashboard{display:inline-block;max-width:110px;margin:0 0 18px}
+.yome-assistant-dashboard.open{display:block;max-width:420px}
 .yome-member-assistant-page{max-width:760px}
 .yome-assistant-launcher{display:flex;align-items:center;gap:10px;border:0;background:#fff;color:var(--yome-ink);padding:9px 13px;border-radius:999px;box-shadow:0 10px 30px rgba(23,32,51,.18);cursor:pointer}
+.yome-assistant-dashboard .yome-assistant-launcher{width:92px;min-height:96px;flex-direction:column;justify-content:center;gap:3px;border:1px solid var(--yome-line);border-radius:8px;padding:7px 8px;box-shadow:0 8px 22px rgba(23,32,51,.12)}
+.yome-launcher-copy{display:flex;min-width:0;flex-direction:column;align-items:center;text-align:center}
+.yome-assistant-dashboard .yome-launcher-text{font-size:12px;line-height:1.1}
 .yome-launcher-text{font-weight:700;font-size:14px;white-space:nowrap}
-.yome-robot{width:54px;height:58px;display:inline-block;position:relative;flex:0 0 54px;animation:yome-bob 2.8s ease-in-out infinite;filter:drop-shadow(0 8px 12px rgba(23,32,51,.18))}
-.yome-robot.small{width:42px;height:45px;flex-basis:42px}
-.yome-robot-antenna{position:absolute;left:50%;top:0;width:2px;height:10px;background:var(--yome-blue);transform:translateX(-50%);border-radius:2px}
-.yome-robot-antenna:after{content:"";position:absolute;left:50%;top:-5px;width:8px;height:8px;background:var(--yome-gold);border-radius:50%;transform:translateX(-50%);animation:yome-pulse 1.7s ease-in-out infinite}
-.yome-robot-head{position:absolute;left:7px;right:7px;top:9px;height:30px;background:linear-gradient(145deg,#fff,#e8f4ff);border:2px solid var(--yome-blue);border-radius:12px}
-.yome-eye{position:absolute;top:10px;width:7px;height:7px;background:var(--yome-ink);border-radius:50%;animation:yome-blink 4s infinite}.yome-eye.left{left:11px}.yome-eye.right{right:11px}
-.yome-robot-mouth{position:absolute;left:50%;bottom:7px;width:14px;height:3px;background:var(--yome-gold);border-radius:4px;transform:translateX(-50%)}
-.yome-robot-body{position:absolute;left:12px;right:12px;top:38px;height:17px;background:linear-gradient(145deg,var(--yome-gold),#ffe48d);border-radius:8px 8px 12px 12px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:11px;color:var(--yome-blue)}
-.yome-robot-arm{position:absolute;top:41px;width:8px;height:3px;background:var(--yome-blue);border-radius:4px}.yome-robot-arm.left{left:5px;transform:rotate(25deg);animation:yome-wave-left 2.2s ease-in-out infinite}.yome-robot-arm.right{right:5px;transform:rotate(-25deg);animation:yome-wave-right 2.2s ease-in-out infinite}
-.yome-robot.small .yome-robot-antenna{height:8px}.yome-robot.small .yome-robot-head{left:6px;right:6px;top:7px;height:24px;border-radius:10px}.yome-robot.small .yome-eye{top:8px;width:5px;height:5px}.yome-robot.small .yome-eye.left{left:8px}.yome-robot.small .yome-eye.right{right:8px}.yome-robot.small .yome-robot-mouth{bottom:5px;width:11px}.yome-robot.small .yome-robot-body{left:10px;right:10px;top:30px;height:13px;font-size:9px}.yome-robot.small .yome-robot-arm{top:33px}
+.yome-bunny-mascot{width:58px;height:66px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 58px;animation:yome-bunny-float 2.8s ease-in-out infinite;filter:drop-shadow(0 9px 13px rgba(23,32,51,.18));transform-origin:50% 85%}
+.yome-bunny-mascot img{display:block;width:100%;height:100%;object-fit:contain}
+.yome-assistant-dashboard .yome-bunny-mascot{width:58px;height:66px;flex-basis:auto}
+.yome-bunny-mascot.small{width:42px;height:50px;flex-basis:42px}
 .yome-chat-panel{display:none;width:min(380px,calc(100vw - 28px));height:520px;max-height:calc(100vh - 110px);background:#fff;border:1px solid var(--yome-line);border-radius:8px;box-shadow:0 18px 50px rgba(23,32,51,.22);overflow:hidden}
 .yome-assistant-inline .yome-chat-panel{width:100%;height:560px}
+.yome-assistant-dashboard .yome-chat-panel{width:min(420px,100%);height:520px;max-height:70vh;margin-top:10px}
 .yome-assistant.open .yome-chat-panel,.yome-assistant-inline .yome-chat-panel{display:flex;flex-direction:column}
 .yome-assistant.open .yome-assistant-launcher,.yome-assistant-inline .yome-assistant-launcher{display:none}
 .yome-chat-head{display:flex;align-items:center;gap:10px;padding:12px 14px;background:#f7fafc;border-bottom:1px solid var(--yome-line)}
@@ -1267,13 +1288,9 @@ final class YOME_WooCommerce_Assistant {
 .yome-chat-form{display:flex;gap:8px;padding:10px;border-top:1px solid var(--yome-line);background:#fff}
 .yome-chat-form input{flex:1;min-width:0;border:1px solid var(--yome-line);border-radius:8px;padding:10px 11px;font-size:14px}
 .yome-chat-form button{border:0;border-radius:8px;background:var(--yome-blue);color:#fff;font-weight:700;padding:0 14px;cursor:pointer}
-@keyframes yome-bob{0%,100%{transform:translateY(0) rotate(-1deg)}50%{transform:translateY(-6px) rotate(1deg)}}
-@keyframes yome-pulse{0%,100%{box-shadow:0 0 0 rgba(242,181,68,0);transform:translateX(-50%) scale(1)}50%{box-shadow:0 0 14px rgba(242,181,68,.8);transform:translateX(-50%) scale(1.2)}}
-@keyframes yome-blink{0%,92%,100%{transform:scaleY(1)}95%{transform:scaleY(.12)}}
-@keyframes yome-wave-left{0%,100%{transform:rotate(25deg)}50%{transform:rotate(2deg)}}
-@keyframes yome-wave-right{0%,100%{transform:rotate(-25deg)}50%{transform:rotate(-2deg)}}
-@media (prefers-reduced-motion:reduce){.yome-robot,.yome-robot-antenna:after,.yome-eye,.yome-robot-arm{animation:none}}
-@media (max-width:480px){.yome-assistant-floating{right:10px;bottom:10px}.yome-chat-panel{width:calc(100vw - 20px);height:540px}.yome-launcher-text{display:none}}
+@keyframes yome-bunny-float{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-6px) rotate(2deg)}}
+@media (prefers-reduced-motion:reduce){.yome-bunny-mascot{animation:none}}
+@media (max-width:480px){.yome-assistant-floating{right:10px;bottom:10px}.yome-chat-panel{width:calc(100vw - 20px);height:540px}.yome-assistant-floating .yome-launcher-copy{display:none}}
 CSS;
     }
 
