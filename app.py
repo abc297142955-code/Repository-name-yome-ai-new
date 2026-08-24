@@ -1099,16 +1099,16 @@ def yome_inventory_reply(message: str, context: Any, can_view_inventory_sales: b
     for index, item in enumerate(items[:10], 1):
         name = yome_inventory_value(item, ["name", "product_name", "nombre", "title", "producto"]) or "Producto"
         code = yome_inventory_value(item, ["code", "sku", "codigo", "código", "barcode"])
-        stock = yome_inventory_value(item, ["stock", "qty", "quantity", "cantidad", "existencia", "available"])
-        store = yome_inventory_value(item, ["store", "branch", "location", "warehouse", "tienda", "almacen", "almacén", "门店"])
-        price = yome_inventory_value(item, ["price", "regular_price", "precio", "precio_regular"])
-        member_price = yome_inventory_value(item, ["member_price", "price_member", "precio_miembro", "miembro", "会员价"])
+        stock = yome_inventory_value(item, ["stock", "stock_qty", "qty", "quantity", "cantidad", "existencia", "available"])
+        store = yome_inventory_value(item, ["store", "store_location", "low_location_text", "branch", "location", "warehouse", "tienda", "almacen", "almacén", "门店"])
+        price = yome_inventory_value(item, ["price", "retail_price", "regular_price", "precio", "precio_regular"])
+        member_price = yome_inventory_value(item, ["member_price", "wholesale_price", "min_wholesale_price", "price_member", "precio_miembro", "miembro", "会员价"])
         sales = yome_inventory_value(item, [
             "sales", "total_sales", "sold", "sold_qty", "quantity_sold",
             "vendido", "vendidos", "ventas", "cantidad_vendida", "unidades_vendidas",
             "salida", "salidas", "orders", "order_count", "销量", "销售量"
         ])
-        image = yome_inventory_value(item, ["image", "image_url", "photo", "foto", "thumbnail"])
+        image = yome_inventory_value(item, ["image", "image_url", "main_photo_url", "photo", "foto", "thumbnail"])
         url = yome_inventory_value(item, ["url", "link", "permalink"])
 
         lines.append("")
@@ -1196,6 +1196,52 @@ def yome_inventory_extract_body_items(body: Any, include_sales: bool = False, li
     return items
 
 
+def yome_inventory_token_from_body(body: Any) -> str:
+    if not isinstance(body, dict):
+        return ""
+    for key in ["token", "access_token", "auth_token", "jwt"]:
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    data = body.get("data")
+    if isinstance(data, dict):
+        return yome_inventory_token_from_body(data)
+    user = body.get("user")
+    if isinstance(user, dict):
+        return yome_inventory_token_from_body(user)
+    return ""
+
+
+def yome_inventory_default_login_url(api_url: str) -> str:
+    parsed = urllib.parse.urlparse(api_url)
+    path = parsed.path or ""
+    if path.endswith("/api/products"):
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/api/login", "", "", ""))
+    return ""
+
+
+def yome_inventory_login_token(api_url: str, username: str, password: str, timeout: int) -> str:
+    login_url = (os.getenv("YOME_INVENTORY_LOGIN_URL") or "").strip() or yome_inventory_default_login_url(api_url)
+    if not login_url or not username or not password:
+        return ""
+
+    payload = json.dumps({"username": username, "password": password}).encode("utf-8")
+    req = urllib.request.Request(
+        login_url,
+        data=payload,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "YOME-AI-Inventory-Sync/1.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        raw_body = res.read(512 * 1024)
+    body = json.loads(raw_body.decode("utf-8-sig", errors="replace"))
+    return yome_inventory_token_from_body(body)
+
+
 def yome_remote_inventory_context(message: str, can_view_inventory_sales: bool = False, limit: int = 12) -> Dict[str, Any]:
     api_url = (os.getenv("YOME_INVENTORY_API_URL") or "").strip()
     if not api_url:
@@ -1223,12 +1269,6 @@ def yome_remote_inventory_context(message: str, can_view_inventory_sales: bool =
         headers["X-YOME-Inventory-Key"] = api_key
         headers["Authorization"] = "Bearer " + api_key
 
-    username = (os.getenv("YOME_INVENTORY_USERNAME") or "").strip()
-    password = (os.getenv("YOME_INVENTORY_PASSWORD") or "").strip()
-    if username or password:
-        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-        headers["Authorization"] = "Basic " + token
-
     timeout_raw = (os.getenv("YOME_INVENTORY_TIMEOUT") or "12").strip()
     try:
         timeout = max(3, min(30, int(timeout_raw)))
@@ -1236,6 +1276,15 @@ def yome_remote_inventory_context(message: str, can_view_inventory_sales: bool =
         timeout = 12
 
     try:
+        username = (os.getenv("YOME_INVENTORY_USERNAME") or "").strip()
+        password = (os.getenv("YOME_INVENTORY_PASSWORD") or "").strip()
+        login_token = yome_inventory_login_token(api_url, username, password, timeout)
+        if login_token:
+            headers["Authorization"] = "Bearer " + login_token
+        elif username or password:
+            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = "Basic " + token
+
         req = urllib.request.Request(url, headers=headers, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as res:
             status = int(getattr(res, "status", 200))

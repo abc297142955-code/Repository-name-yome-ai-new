@@ -43,11 +43,19 @@ Recommended variables:
   - Optional CORS origin, for example `https://yome.it.com`.
 - `YOME_INVENTORY_API_URL`
   - Optional Railway-side live inventory source. Use
+    `https://yome-inventory-deploy-production.up.railway.app/api/products` for
+    the real YOME inventory app, or
     `https://yome.it.com/wp-json/yome-assistant/v1/inventory` after the
-    WordPress plugin is active.
+    WordPress bridge plugin is active.
+- `YOME_INVENTORY_LOGIN_URL`
+  - Optional login endpoint for the real YOME inventory app:
+    `https://yome-inventory-deploy-production.up.railway.app/api/login`.
 - `YOME_INVENTORY_API_KEY`
   - Optional key sent as `X-YOME-Inventory-Key` and `Bearer` authorization when
     Railway pulls live YOME inventory.
+- `YOME_INVENTORY_USERNAME` / `YOME_INVENTORY_PASSWORD`
+  - Optional inventory app login credentials. Store these only as Railway
+    environment variables, never in GitHub.
 - `YOME_INVENTORY_CHECK_KEY`
   - Optional key for `/yome-inventory-check`. If omitted, the site widget key is
     used for this check page.
@@ -70,6 +78,11 @@ WordPress install
    plugin auto-read real YOME warehouse tables from the same WordPress database.
    If the correct table is not auto-detected, fill **YOME inventory table** with
    the real warehouse table shown in the settings preview candidates.
+   To connect the separate YOME inventory app directly, set **Inventory API URL**
+   to `https://yome-inventory-deploy-production.up.railway.app/api/products`,
+   set **Inventory login URL** to
+   `https://yome-inventory-deploy-production.up.railway.app/api/login`, and fill
+   the inventory username/password in WordPress settings.
 7. Optional: use the built-in API URL
    `https://yome.it.com/wp-json/yome-assistant/v1/inventory` for testing after
    the plugin is active. It accepts `q` and `limit`.
@@ -116,6 +129,10 @@ Membership behavior
   configured. Use `/yome-inventory-check?key=YOUR_CHECK_KEY` to confirm how many
   live products and quantities Railway can read. The assistant still avoids the
   old `products.csv` stock when live inventory is missing.
+- The separate YOME inventory app uses `POST /api/login` to return a token, then
+  `GET /api/products` to return inventory. The assistant maps fields such as
+  `name`, `code`, `stock_qty`, `retail_price`, `wholesale_price`,
+  `main_photo_url`, and `low_location_text`.
 - Chat records are append-only. `/chat-inbox` shows the normal chat window,
   `/customer-chat-records` shows older customer logs, and
   `/chat-retention-check` confirms that logs are not auto-deleted and are also

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.6
+ * Version: 1.0.7
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -76,6 +76,7 @@ final class YOME_WooCommerce_Assistant {
             'widget_key' => '',
             'inventory_enabled' => 'no',
             'inventory_api_url' => '',
+            'inventory_login_url' => '',
             'inventory_api_key' => '',
             'inventory_username' => '',
             'inventory_password' => '',
@@ -114,6 +115,7 @@ final class YOME_WooCommerce_Assistant {
             $widget_key = sanitize_text_field(wp_unslash($_POST['widget_key'] ?? ''));
             $inventory_enabled = !empty($_POST['inventory_enabled']) ? 'yes' : 'no';
             $inventory_api_url = esc_url_raw(wp_unslash($_POST['inventory_api_url'] ?? ''));
+            $inventory_login_url = esc_url_raw(wp_unslash($_POST['inventory_login_url'] ?? ''));
             $inventory_api_key = sanitize_text_field(wp_unslash($_POST['inventory_api_key'] ?? ''));
             $inventory_username = sanitize_text_field(wp_unslash($_POST['inventory_username'] ?? ''));
             $inventory_password = sanitize_text_field(wp_unslash($_POST['inventory_password'] ?? ''));
@@ -130,6 +132,7 @@ final class YOME_WooCommerce_Assistant {
                 'widget_key' => $widget_key,
                 'inventory_enabled' => $inventory_enabled,
                 'inventory_api_url' => $inventory_api_url,
+                'inventory_login_url' => $inventory_login_url,
                 'inventory_api_key' => $inventory_api_key,
                 'inventory_username' => $inventory_username,
                 'inventory_password' => $inventory_password,
@@ -178,8 +181,16 @@ final class YOME_WooCommerce_Assistant {
                         <td>
                             <input name="inventory_api_url" id="inventory_api_url" type="url" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_api_url']); ?>" />
-                            <p class="description">Leave blank to auto-detect the real YOME warehouse tables in WordPress. Do not paste the built-in API here; it is only for testing or external tools.</p>
+                            <p class="description">For the YOME inventory app, use <code>https://yome-inventory-deploy-production.up.railway.app/api/products</code>. Leave blank only for WordPress database auto-detect.</p>
                             <p class="description">Built-in API after activation: <code><?php echo esc_html(rest_url('yome-assistant/v1/inventory')); ?></code></p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="inventory_login_url">Inventory login URL</label></th>
+                        <td>
+                            <input name="inventory_login_url" id="inventory_login_url" type="url" class="regular-text"
+                                   value="<?php echo esc_attr($options['inventory_login_url']); ?>" />
+                            <p class="description">For the YOME inventory app, use <code>https://yome-inventory-deploy-production.up.railway.app/api/login</code>. If blank, it is auto-derived from <code>/api/products</code>.</p>
                         </td>
                     </tr>
                     <tr>
@@ -619,7 +630,10 @@ final class YOME_WooCommerce_Assistant {
             $headers['X-YOME-Inventory-Key'] = $options['inventory_api_key'];
             $headers['Authorization'] = 'Bearer ' . $options['inventory_api_key'];
         }
-        if (!empty($options['inventory_username']) || !empty($options['inventory_password'])) {
+        $login_token = self::inventory_login_token($inventory_api_url, $options);
+        if ($login_token !== '') {
+            $headers['Authorization'] = 'Bearer ' . $login_token;
+        } elseif (!empty($options['inventory_username']) || !empty($options['inventory_password'])) {
             $headers['Authorization'] = 'Basic ' . base64_encode(
                 ($options['inventory_username'] ?? '') . ':' . ($options['inventory_password'] ?? '')
             );
@@ -657,6 +671,7 @@ final class YOME_WooCommerce_Assistant {
             'queried' => true,
             'query' => $message,
             'search' => $search,
+            'source' => 'external_yome_inventory_api',
             'can_view_inventory_sales' => $can_view_inventory_sales,
             'live' => true,
             'fetched_at' => gmdate('c'),
@@ -694,6 +709,85 @@ final class YOME_WooCommerce_Assistant {
         }
 
         return false;
+    }
+
+    private static function inventory_default_login_url(string $api_url): string {
+        $parts = wp_parse_url($api_url);
+        $path = isset($parts['path']) ? (string) $parts['path'] : '';
+        if (substr($path, -13) !== '/api/products') {
+            return '';
+        }
+
+        $scheme = isset($parts['scheme']) ? (string) $parts['scheme'] : 'https';
+        $host = isset($parts['host']) ? (string) $parts['host'] : '';
+        if ($host === '') {
+            return '';
+        }
+        $port = isset($parts['port']) ? ':' . (string) $parts['port'] : '';
+        return $scheme . '://' . $host . $port . '/api/login';
+    }
+
+    private static function inventory_token_from_body($body): string {
+        if (!is_array($body)) {
+            return '';
+        }
+
+        foreach (['token', 'access_token', 'auth_token', 'jwt'] as $key) {
+            if (!empty($body[$key]) && is_scalar($body[$key])) {
+                return (string) $body[$key];
+            }
+        }
+
+        foreach (['data', 'user'] as $key) {
+            if (!empty($body[$key]) && is_array($body[$key])) {
+                $token = self::inventory_token_from_body($body[$key]);
+                if ($token !== '') {
+                    return $token;
+                }
+            }
+        }
+
+        return '';
+    }
+
+    private static function inventory_login_token(string $api_url, array $options): string {
+        $username = trim((string) ($options['inventory_username'] ?? ''));
+        $password = trim((string) ($options['inventory_password'] ?? ''));
+        if ($username === '' || $password === '') {
+            return '';
+        }
+
+        $login_url = trim((string) ($options['inventory_login_url'] ?? ''));
+        if ($login_url === '') {
+            $login_url = self::inventory_default_login_url($api_url);
+        }
+        if ($login_url === '') {
+            return '';
+        }
+
+        $response = wp_remote_post($login_url, [
+            'timeout' => 12,
+            'headers' => [
+                'Accept' => 'application/json',
+                'Content-Type' => 'application/json',
+            ],
+            'body' => wp_json_encode([
+                'username' => $username,
+                'password' => $password,
+            ]),
+        ]);
+
+        if (is_wp_error($response)) {
+            return '';
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code < 200 || $code >= 300 || !is_array($body)) {
+            return '';
+        }
+
+        return trim(self::inventory_token_from_body($body));
     }
 
     private static function local_inventory_items(string $search = '', int $limit = 12, bool $include_sales = false, string $preferred_table = ''): array {
@@ -1010,11 +1104,11 @@ final class YOME_WooCommerce_Assistant {
                 'name' => self::first_value($item, ['name', 'product_name', 'nombre', 'title', 'producto']),
                 'code' => self::first_value($item, ['code', 'sku', 'codigo', 'código', 'barcode']),
                 'category' => self::first_value($item, ['category', 'categoria', 'categoría']),
-                'stock' => self::first_value($item, ['stock', 'qty', 'quantity', 'cantidad', 'existencia', 'available']),
-                'store' => self::first_value($item, ['store', 'branch', 'location', 'warehouse', 'tienda', 'almacen', 'almacén', '门店']),
-                'price' => self::first_value($item, ['price', 'regular_price', 'precio', 'precio_regular']),
-                'member_price' => self::first_value($item, ['member_price', 'price_member', 'precio_miembro', 'miembro', '会员价']),
-                'image' => self::first_value($item, ['image', 'image_url', 'photo', 'foto', 'thumbnail']),
+                'stock' => self::first_value($item, ['stock', 'stock_qty', 'qty', 'quantity', 'cantidad', 'existencia', 'available']),
+                'store' => self::first_value($item, ['store', 'store_location', 'low_location_text', 'branch', 'location', 'warehouse', 'tienda', 'almacen', 'almacén', '门店']),
+                'price' => self::first_value($item, ['price', 'retail_price', 'regular_price', 'precio', 'precio_regular']),
+                'member_price' => self::first_value($item, ['member_price', 'wholesale_price', 'min_wholesale_price', 'price_member', 'precio_miembro', 'miembro', '会员价']),
+                'image' => self::first_value($item, ['image', 'image_url', 'main_photo_url', 'photo', 'foto', 'thumbnail']),
                 'url' => self::first_value($item, ['url', 'link', 'permalink']),
                 'updated_at' => self::first_value($item, ['updated_at', 'created_at', 'date', 'fecha']),
             ];
