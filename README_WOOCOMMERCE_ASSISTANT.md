@@ -26,6 +26,8 @@ Files
     catalog route.
   - The settings page shows an admin-only inventory preview, so admins can test
     live inventory without opening the protected REST API directly.
+  - Admins and WooCommerce managers can ask for product stock and sales. Sales
+    are sent only for users with admin/store-manager permissions.
   - Requests inventory live for each customer question with no-cache headers and
     a cache-busting timestamp, so old product data is not reused.
   - Proxies chat through WordPress AJAX so the widget key is not exposed in the
@@ -72,7 +74,8 @@ Membership behavior
 -------------------
 
 - If WooCommerce Memberships is installed, the widget only appears for active
-  members.
+  members. Administrators and WooCommerce managers can also use it for internal
+  stock/sales checks.
 - Otherwise, it appears for logged-in WordPress/WooCommerce customers.
 - You can also place `[yome_assistant]` on a member-only page.
 - The second product price is shown to customers as the YOME member price.
@@ -87,6 +90,9 @@ Membership behavior
 - If those tables are not found, the plugin reads WooCommerce/member-system
   products directly with `wc_get_products` and product stock fields. It does not
   use the WooCommerce POS/caja catalog route.
+- Admin/staff questions such as `cuanto stock tiene mochila`, `ventas mochila`,
+  or `这个货有多少销量` can include `Stock` and `Ventas registradas`. Regular
+  members do not receive sales totals.
 - Member chat product questions require live YOME · INVENTARIO data. If the live
   inventory API is not configured or returns no data, `/site-chat` will not fall
   back to the older local `products.csv` catalog.

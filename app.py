@@ -872,11 +872,13 @@ def yome_catalog_intent(text: str) -> bool:
         "catalogo", "catálogo", "mercancia", "mercancía", "mercancias", "mercancías",
         "producto", "productos", "variedades", "novedad", "novedades", "nuevo", "nueva",
         "nuevos", "nuevas", "llegaron", "disponible", "disponibles", "venden", "tienen",
-        "hay", "库存", "商品", "产品", "新品", "新货", "目录", "有什么"
+        "hay", "stock", "existencia", "ventas", "vendido", "vendidos", "sales", "sold",
+        "库存", "商品", "产品", "新品", "新货", "目录", "有什么", "销量", "销售"
     ]
     question_words = [
         "que", "qué", "cual", "cuál", "ver", "mandame", "mándame", "mostrar", "muestra",
-        "quiero ver", "tienes", "tienen", "hay", "catalogo", "catálogo", "有什么"
+        "quiero ver", "tienes", "tienen", "hay", "catalogo", "catálogo",
+        "ventas", "vendido", "sales", "sold", "stock", "库存", "销量", "有什么"
     ]
     return any(word in low for word in catalog_words) and any(word in low for word in question_words)
 
@@ -1072,10 +1074,11 @@ def yome_inventory_items(context: Any) -> List[Dict[str, Any]]:
     return [item for item in raw if isinstance(item, dict)]
 
 
-def yome_inventory_reply(message: str, context: Any) -> str:
+def yome_inventory_reply(message: str, context: Any, can_view_inventory_sales: bool = False) -> str:
     if not isinstance(context, dict) or not context.get("enabled"):
         return ""
 
+    can_view_inventory_sales = bool(can_view_inventory_sales or context.get("can_view_inventory_sales"))
     items = yome_inventory_items(context)
     if not items:
         inventory_was_queried = bool(context.get("queried")) and (
@@ -1101,6 +1104,11 @@ def yome_inventory_reply(message: str, context: Any) -> str:
         store = yome_inventory_value(item, ["store", "branch", "location", "warehouse", "tienda", "almacen", "almacén", "门店"])
         price = yome_inventory_value(item, ["price", "regular_price", "precio", "precio_regular"])
         member_price = yome_inventory_value(item, ["member_price", "price_member", "precio_miembro", "miembro", "会员价"])
+        sales = yome_inventory_value(item, [
+            "sales", "total_sales", "sold", "sold_qty", "quantity_sold",
+            "vendido", "vendidos", "ventas", "cantidad_vendida", "unidades_vendidas",
+            "salida", "salidas", "orders", "order_count", "销量", "销售量"
+        ])
         image = yome_inventory_value(item, ["image", "image_url", "photo", "foto", "thumbnail"])
         url = yome_inventory_value(item, ["url", "link", "permalink"])
 
@@ -1113,6 +1121,8 @@ def yome_inventory_reply(message: str, context: Any) -> str:
         if member_price:
             lines.append(f"Precio miembro: RD${money(member_price)}")
         lines.append(f"Stock: {stock if stock else 'Disponible / consultar cantidad'}")
+        if can_view_inventory_sales and sales:
+            lines.append(f"Ventas registradas: {sales}")
         if store:
             lines.append(f"Ubicación/Tienda: {store}")
         if image:
@@ -1566,7 +1576,8 @@ def site_chat():
         }, 400)
 
     inventory_context = payload.get("yome_inventory_context")
-    inventory_reply = yome_inventory_reply(message, inventory_context)
+    can_view_inventory_sales = bool(payload.get("can_view_inventory_sales"))
+    inventory_reply = yome_inventory_reply(message, inventory_context, can_view_inventory_sales)
     if inventory_reply:
         return site_chat_json({
             "status": "ok",
