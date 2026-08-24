@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -482,6 +482,10 @@ final class YOME_WooCommerce_Assistant {
         return rest_ensure_response([
             'api' => rest_url('yome-assistant/v1/inventory'),
             'debug' => rest_url('yome-assistant/v1/inventory-debug'),
+            'woocommerce_member_inventory' => [
+                'available' => function_exists('wc_get_products'),
+                'sample' => self::woocommerce_inventory_items('', 3),
+            ],
             'tables' => $tables,
         ]);
     }
@@ -608,7 +612,180 @@ final class YOME_WooCommerce_Assistant {
             }
         }
 
+        if (count($items) < $limit) {
+            $seen = [];
+            foreach ($items as $item) {
+                $key = strtolower(($item['code'] ?? '') . '|' . ($item['name'] ?? ''));
+                $seen[$key] = true;
+            }
+
+            foreach (self::woocommerce_inventory_items($search, $limit - count($items)) as $item) {
+                $key = strtolower(($item['code'] ?? '') . '|' . ($item['name'] ?? ''));
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $items[] = $item;
+                $seen[$key] = true;
+                if (count($items) >= $limit) {
+                    break;
+                }
+            }
+        }
+
         return $items;
+    }
+
+    private static function woocommerce_inventory_items(string $search = '', int $limit = 12): array {
+        if (!function_exists('wc_get_product') || !function_exists('wc_get_products')) {
+            return [];
+        }
+
+        $limit = max(1, min(50, absint($limit)));
+        $products = self::woocommerce_products_for_inventory($search, $limit);
+        $items = [];
+
+        foreach ($products as $product) {
+            if (!is_object($product) || !method_exists($product, 'get_id')) {
+                continue;
+            }
+
+            $stock_qty = method_exists($product, 'get_stock_quantity') ? $product->get_stock_quantity() : null;
+            $stock_status = method_exists($product, 'get_stock_status') ? (string) $product->get_stock_status() : '';
+            $stock_text = $stock_qty !== null ? (string) $stock_qty : self::stock_status_text($stock_status);
+
+            $image = '';
+            if (method_exists($product, 'get_image_id')) {
+                $image_id = (int) $product->get_image_id();
+                if ($image_id > 0) {
+                    $image = (string) wp_get_attachment_image_url($image_id, 'medium');
+                }
+            }
+
+            $items[] = [
+                'name' => method_exists($product, 'get_name') ? (string) $product->get_name() : '',
+                'code' => method_exists($product, 'get_sku') ? (string) $product->get_sku() : '',
+                'category' => self::woocommerce_product_categories((int) $product->get_id()),
+                'stock' => $stock_text,
+                'store' => 'YOME member system',
+                'price' => self::woocommerce_product_price($product),
+                'member_price' => self::woocommerce_member_price($product),
+                'image' => $image,
+                'url' => get_permalink((int) $product->get_id()),
+                'updated_at' => self::woocommerce_product_modified($product),
+                'source' => 'woocommerce_member_system',
+            ];
+        }
+
+        return $items;
+    }
+
+    private static function woocommerce_products_for_inventory(string $search, int $limit): array {
+        global $wpdb;
+
+        $search = trim($search);
+        if ($search !== '' && !empty($wpdb)) {
+            $like = '%' . $wpdb->esc_like($search) . '%';
+            $sql = "
+                SELECT DISTINCT p.ID
+                FROM {$wpdb->posts} p
+                LEFT JOIN {$wpdb->postmeta} sku ON sku.post_id = p.ID AND sku.meta_key = '_sku'
+                WHERE p.post_type = 'product'
+                  AND p.post_status = 'publish'
+                  AND (p.post_title LIKE %s OR sku.meta_value LIKE %s)
+                ORDER BY p.post_modified DESC
+                LIMIT %d
+            ";
+            $ids = $wpdb->get_col($wpdb->prepare($sql, $like, $like, $limit));
+            if (is_array($ids) && $ids) {
+                $products = [];
+                foreach ($ids as $id) {
+                    $product = wc_get_product((int) $id);
+                    if ($product) {
+                        $products[] = $product;
+                    }
+                }
+                return $products;
+            }
+        }
+
+        $args = [
+            'status' => 'publish',
+            'limit' => $limit,
+            'orderby' => 'modified',
+            'order' => 'DESC',
+            'return' => 'objects',
+        ];
+        if ($search !== '') {
+            $args['search'] = '*' . $search . '*';
+        }
+
+        $products = wc_get_products($args);
+        return is_array($products) ? $products : [];
+    }
+
+    private static function stock_status_text(string $stock_status): string {
+        if ($stock_status === 'instock') {
+            return 'Disponible';
+        }
+        if ($stock_status === 'outofstock') {
+            return 'Agotado';
+        }
+        if ($stock_status === 'onbackorder') {
+            return 'Por encargo';
+        }
+        return $stock_status;
+    }
+
+    private static function woocommerce_product_price($product): string {
+        foreach (['get_regular_price', 'get_price'] as $method) {
+            if (method_exists($product, $method)) {
+                $value = (string) $product->{$method}();
+                if ($value !== '') {
+                    return $value;
+                }
+            }
+        }
+        return '';
+    }
+
+    private static function woocommerce_member_price($product): string {
+        if (!is_object($product) || !method_exists($product, 'get_id')) {
+            return '';
+        }
+
+        $id = (int) $product->get_id();
+        $keys = [
+            '_member_price', 'member_price', '_membership_price', 'membership_price',
+            '_price_wholesale', 'price_wholesale', '_wholesale_price', 'wholesale_price',
+            '_precio_miembro', 'precio_miembro', '_precio_mayor', 'precio_mayor',
+            '_mayor', 'mayor',
+        ];
+        foreach ($keys as $key) {
+            $value = get_post_meta($id, $key, true);
+            if (is_scalar($value) && (string) $value !== '') {
+                return (string) $value;
+            }
+        }
+
+        return '';
+    }
+
+    private static function woocommerce_product_categories(int $product_id): string {
+        $terms = wp_get_post_terms($product_id, 'product_cat', ['fields' => 'names']);
+        if (!is_array($terms) || is_wp_error($terms)) {
+            return '';
+        }
+        return implode(', ', array_map('strval', $terms));
+    }
+
+    private static function woocommerce_product_modified($product): string {
+        if (is_object($product) && method_exists($product, 'get_date_modified')) {
+            $date = $product->get_date_modified();
+            if (is_object($date) && method_exists($date, 'date')) {
+                return (string) $date->date('c');
+            }
+        }
+        return '';
     }
 
     private static function inventory_candidate_tables(): array {

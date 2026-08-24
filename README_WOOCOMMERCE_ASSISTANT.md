@@ -21,6 +21,9 @@ Files
     `/wp-json/yome-assistant/v1/inventory` and can auto-read likely YOME
     inventory tables from the same WordPress database when **Inventory API URL**
     is left blank.
+  - If no separate YOME inventory table is found, it falls back to live
+    WooCommerce/member-system product inventory. It does not use the POS/caja
+    catalog route.
   - Requests inventory live for each customer question with no-cache headers and
     a cache-busting timestamp, so old product data is not reused.
   - Proxies chat through WordPress AJAX so the widget key is not exposed in the
@@ -48,7 +51,9 @@ WordPress install
    `https://repository-name-yome-ai-new-production.up.railway.app/site-chat`
 5. Set **Widget key** to the same value as `YOME_SITE_WIDGET_KEY`.
 6. Enable **YOME · INVENTARIO**. Leave **Inventory API URL** blank to let the
-   plugin auto-read live inventory tables from the same WordPress database.
+   plugin auto-read live inventory tables from the same WordPress database. If
+   no separate inventory table is found, it will read WooCommerce/member-system
+   product inventory live.
 7. Optional: use the built-in API URL
    `https://yome.it.com/wp-json/yome-assistant/v1/inventory` for testing after
    the plugin is active. It accepts `q` and `limit`.
@@ -74,6 +79,9 @@ Membership behavior
 - If **Inventory API URL** is blank, the plugin scans likely custom inventory
   tables such as names containing `yome`, `invent`, `stock`, `tienda`, or
   `almacen`, maps product fields, and sends the latest rows to the AI.
+- If those tables are not found, the plugin reads WooCommerce/member-system
+  products directly with `wc_get_products` and product stock fields. It does not
+  use the WooCommerce POS/caja catalog route.
 - Member chat product questions require live YOME · INVENTARIO data. If the live
   inventory API is not configured or returns no data, `/site-chat` will not fall
   back to the older local `products.csv` catalog.
