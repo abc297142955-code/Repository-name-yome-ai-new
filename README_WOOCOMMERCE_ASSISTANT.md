@@ -52,6 +52,9 @@ Recommended variables:
 - `YOME_INVENTORY_CHECK_KEY`
   - Optional key for `/yome-inventory-check`. If omitted, the site widget key is
     used for this check page.
+- `YOME_CHAT_KEEP_DAYS`
+  - Optional display/policy value for chat retention checks. The default is 90,
+    and the app will not report less than 31 days.
 
 WordPress install
 -----------------
@@ -114,3 +117,7 @@ Membership behavior
   configured. Use `/yome-inventory-check?key=YOUR_CHECK_KEY` to confirm how many
   live products and quantities Railway can read. The assistant still avoids the
   old `products.csv` stock when live inventory is missing.
+- Chat records are append-only. `/chat-inbox` shows the normal chat window,
+  `/customer-chat-records` shows older customer logs, and
+  `/chat-retention-check` confirms that logs are not auto-deleted and are also
+  copied into monthly archives under `chat_archives/YYYY-MM/`.

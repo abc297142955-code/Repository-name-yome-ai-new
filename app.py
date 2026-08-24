@@ -631,7 +631,6 @@ def append_chat(phone: str, role: str, message: str) -> None:
         if last.get("role") == role and last.get("message") == message:
             return
     data[phone].append(item)
-    data[phone] = data[phone][-200:]
     save_json(CHAT_JSON, data)
 
 
@@ -3722,6 +3721,7 @@ def yome_safe_admin_center_v1():
         ("旧版主后台 / App", "/app", "旧版本主后台，如果存在就从这里进"),
         ("产品后台 / Product Admin", "/product-admin", "旧版产品管理页面"),
         ("聊天后台 / LiveChat", "/livechat", "客户聊天页面"),
+        ("聊天保存检查", "/chat-retention-check", "确认聊天记录不自动删除并按月份归档"),
         ("客户中心 / Customer Center", "/customer-center", "客户资料和聊天记录"),
         ("付款后台 / Payment", "/payment-dashboard", "付款截图和付款记录"),
         ("最新产品 / Latest Products", "/latest-products", "查看最新产品"),
@@ -4171,6 +4171,7 @@ except Exception:
     YOME_CCR_DATA_DIR_V1.mkdir(parents=True, exist_ok=True)
 
 YOME_CCR_LOG_V1 = YOME_CCR_DATA_DIR_V1 / "customer_chat_records_v1.jsonl"
+YOME_CCR_ARCHIVE_DIR_V1 = YOME_CCR_DATA_DIR_V1 / "chat_archives"
 
 def yome_ccr_digits_v1(s):
     return re.sub(r"[^0-9]", "", str(s or ""))
@@ -4284,6 +4285,15 @@ def yome_ccr_append_record_v1(record):
     try:
         YOME_CCR_LOG_V1.parent.mkdir(parents=True, exist_ok=True)
         with YOME_CCR_LOG_V1.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        month = str(record.get("time") or time.strftime("%Y-%m-%d"))[:7]
+        if not re.match(r"^\d{4}-\d{2}$", month):
+            month = time.strftime("%Y-%m")
+        archive_dir = YOME_CCR_ARCHIVE_DIR_V1 / month
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_file = archive_dir / "customer_chat_records_v1.jsonl"
+        with archive_file.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:
         print("[YOME CCR V1] append error:", e)
@@ -5136,9 +5146,10 @@ a{color:#0f6bff;font-weight:900;}
 
 <div class="wrap">
 <div class="card">
-<p><b>记录数量:</b> {{count}}</p>
+<p><b>当前页面显示:</b> {{count}} 条</p>
+<p>完整记录保存在文件里，不会因为页面只显示 300 条而删除。</p>
 <p><b>保存文件:</b> {{log_file}}</p>
-<p><a href="/admin-center">返回后台</a> · <a href="/customer-chat-records">刷新</a></p>
+<p><a href="/admin-center">返回后台</a> · <a href="/customer-chat-records">刷新</a> · <a href="/chat-retention-check">保存检查</a></p>
 <form method="get" action="/customer-chat-records">
 <input name="phone" placeholder="客户号码" value="{{phone_q}}">
 <input name="q" placeholder="搜索内容" value="{{q}}">
@@ -5246,6 +5257,7 @@ except Exception:
 
 YOME_CHAT_LOG_V1 = YOME_CHAT_DATA_DIR_V1 / "normal_chat_inbox_v1.jsonl"
 YOME_OLD_CUSTOMER_LOG_V1 = YOME_CHAT_DATA_DIR_V1 / "customer_chat_records_v1.jsonl"
+YOME_CHAT_ARCHIVE_DIR_V1 = YOME_CHAT_DATA_DIR_V1 / "chat_archives"
 
 def yome_chat_digits_v1(s):
     return re.sub(r"[^0-9]", "", str(s or ""))
@@ -5354,6 +5366,18 @@ def yome_chat_find_urls_v1(data):
                 urls.append(u)
     return urls[:8]
 
+def yome_chat_archive_month_v1(record):
+    month = str(record.get("time") or time.strftime("%Y-%m-%d"))[:7]
+    if not re.match(r"^\d{4}-\d{2}$", month):
+        month = time.strftime("%Y-%m")
+    return month
+
+def yome_chat_append_jsonl_v1(path, record):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
 def yome_chat_append_v1(phone, direction, message, source="system", urls=None):
     try:
         phone = yome_chat_phone_v1(phone)
@@ -5376,9 +5400,9 @@ def yome_chat_append_v1(phone, direction, message, source="system", urls=None):
             "source": source
         }
 
-        YOME_CHAT_LOG_V1.parent.mkdir(parents=True, exist_ok=True)
-        with YOME_CHAT_LOG_V1.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        yome_chat_append_jsonl_v1(YOME_CHAT_LOG_V1, record)
+        archive_file = YOME_CHAT_ARCHIVE_DIR_V1 / yome_chat_archive_month_v1(record) / "normal_chat_inbox_v1.jsonl"
+        yome_chat_append_jsonl_v1(archive_file, record)
 
     except Exception as e:
         print("[YOME CHAT INBOX V1] append error:", e)
@@ -5541,6 +5565,136 @@ def yome_chat_threads_v1():
     result.sort(key=lambda x: x.get("last_time", ""), reverse=True)
     return result, threads
 
+def yome_chat_retention_days_v1():
+    raw = os.getenv("YOME_CHAT_KEEP_DAYS") or "90"
+    try:
+        days = int(raw)
+    except Exception:
+        days = 90
+    return max(31, days)
+
+def yome_chat_record_ts_v1(record):
+    try:
+        value = float(record.get("ts") or 0)
+        if value > 0:
+            return value
+    except Exception:
+        pass
+
+    text = str(record.get("time") or "")
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"]:
+        try:
+            return time.mktime(time.strptime(text[:19], fmt))
+        except Exception:
+            pass
+    return 0
+
+def yome_chat_file_info_v1(path):
+    path = Path(path)
+    info = {"path": str(path), "exists": path.exists(), "bytes": 0, "lines": 0}
+    try:
+        if path.exists():
+            info["bytes"] = path.stat().st_size
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                info["lines"] = sum(1 for _ in f)
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+def yome_chat_archive_months_v1():
+    months = []
+    try:
+        if YOME_CHAT_ARCHIVE_DIR_V1.exists():
+            for p in sorted(YOME_CHAT_ARCHIVE_DIR_V1.iterdir(), reverse=True):
+                if p.is_dir():
+                    months.append(p.name)
+    except Exception:
+        pass
+    return months[:24]
+
+def yome_chat_retention_status_v1():
+    records = yome_chat_all_records_v1()
+    thread_list, _threads = yome_chat_threads_v1()
+    ts_values = [yome_chat_record_ts_v1(r) for r in records]
+    ts_values = [t for t in ts_values if t > 0]
+    oldest_ts = min(ts_values) if ts_values else 0
+    newest_ts = max(ts_values) if ts_values else 0
+    now_ts = time.time()
+
+    return {
+        "ok": True,
+        "policy": "no_auto_delete",
+        "retention_days_minimum": yome_chat_retention_days_v1(),
+        "message": "Chat logs are appended and kept. Pages may limit display, but files are not automatically deleted.",
+        "records": len(records),
+        "threads": len(thread_list),
+        "oldest_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(oldest_ts)) if oldest_ts else "",
+        "newest_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(newest_ts)) if newest_ts else "",
+        "oldest_age_days": int((now_ts - oldest_ts) / 86400) if oldest_ts else 0,
+        "main_log": yome_chat_file_info_v1(YOME_CHAT_LOG_V1),
+        "old_customer_log": yome_chat_file_info_v1(YOME_OLD_CUSTOMER_LOG_V1),
+        "chat_history_json": yome_chat_file_info_v1(CHAT_JSON),
+        "archive_dir": str(YOME_CHAT_ARCHIVE_DIR_V1),
+        "archive_months": yome_chat_archive_months_v1(),
+    }
+
+def yome_chat_retention_check_page_v1():
+    if str(request.args.get("format") or "").lower() == "json":
+        return jsonify(yome_chat_retention_status_v1())
+
+    status = yome_chat_retention_status_v1()
+    page = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>YOME Chat Retention</title>
+<style>
+body{font-family:Arial,'Microsoft YaHei',sans-serif;background:#f5f7fb;margin:0;color:#111827;}
+.header{background:#0f6bff;color:white;padding:22px 28px;}
+.header h1{margin:0;font-size:32px;}
+.wrap{padding:22px;max-width:1100px;margin:auto;}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;}
+.card{background:white;border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.07);}
+.num{font-size:34px;font-weight:900;color:#0f6bff;}
+code{background:#eef2ff;padding:2px 5px;border-radius:6px;}
+a{color:#0f6bff;font-weight:900;}
+pre{white-space:pre-wrap;background:#111827;color:#e5e7eb;padding:14px;border-radius:12px;}
+</style>
+</head>
+<body>
+<div class="header">
+<h1>YOME 聊天保存检查</h1>
+<div>不自动删除聊天记录，至少保存 {{status.retention_days_minimum}} 天以上</div>
+</div>
+<div class="wrap">
+<div class="grid">
+<div class="card"><div class="num">{{status.records}}</div><div>聊天记录</div></div>
+<div class="card"><div class="num">{{status.threads}}</div><div>客户会话</div></div>
+<div class="card"><div class="num">{{status.oldest_age_days}}</div><div>最早记录已保存天数</div></div>
+</div>
+<div class="card">
+<p><b>策略:</b> {{status.policy}}</p>
+<p><b>最早聊天:</b> {{status.oldest_time or '暂无'}}</p>
+<p><b>最新聊天:</b> {{status.newest_time or '暂无'}}</p>
+<p><b>主聊天文件:</b> <code>{{status.main_log.path}}</code> · {{status.main_log.lines}} 行</p>
+<p><b>旧客户记录:</b> <code>{{status.old_customer_log.path}}</code> · {{status.old_customer_log.lines}} 行</p>
+<p><b>基础聊天 JSON:</b> <code>{{status.chat_history_json.path}}</code></p>
+<p><b>月份归档目录:</b> <code>{{status.archive_dir}}</code></p>
+<p><b>已有归档月份:</b> {{status.archive_months|join(', ') if status.archive_months else '暂无，新聊天产生后自动创建'}}</p>
+<p><a href="/chat-inbox">打开正常聊天窗口</a> · <a href="/customer-chat-records">打开旧记录</a> · <a href="/chat-retention-check?format=json">JSON</a></p>
+</div>
+<div class="card">
+<h2>说明</h2>
+<p>聊天后台页面为了打开更快，可能只显示最近一部分记录；完整聊天保存在上面的日志文件和月份归档里。</p>
+<p>系统现在不会因为超过 200 条或超过 30 天自动删除聊天。</p>
+</div>
+</div>
+</body>
+</html>
+"""
+    return render_template_string(page, status=status)
+
 def yome_chat_linkify_v1(text):
     text = html.escape(str(text or ""))
     text = re.sub(r"(https?://[^\s<]+)", r'<a href="\1" target="_blank">\1</a>', text)
@@ -5619,6 +5773,7 @@ a{color:#0f6bff;font-weight:700;}
       <div class="actions">
         <a href="/admin-center">Admin</a>
         <a href="/chat-inbox">刷新</a>
+        <a href="/chat-retention-check">保存检查</a>
         <a href="/customer-chat-records">旧记录</a>
       </div>
     </div>
@@ -5685,6 +5840,9 @@ try:
 
     if not any(str(rule.rule) == "/chat" for rule in app.url_map.iter_rules()):
         app.add_url_rule("/chat", "yome_chat_redirect_v1", lambda: redirect("/chat-inbox"), methods=["GET"])
+
+    if not any(str(rule.rule) == "/chat-retention-check" for rule in app.url_map.iter_rules()):
+        app.add_url_rule("/chat-retention-check", "yome_chat_retention_check_page_v1", yome_chat_retention_check_page_v1, methods=["GET"])
 
     # 把聊天记录器放在最前面：只记录，不拦截
     funcs = app.before_request_funcs.get(None, [])
