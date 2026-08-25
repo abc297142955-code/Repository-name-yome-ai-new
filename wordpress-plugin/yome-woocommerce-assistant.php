@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.9
+ * Version: 1.0.10
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -14,6 +14,8 @@ if (!defined('ABSPATH')) {
 final class YOME_WooCommerce_Assistant {
     private const OPTION_KEY = 'yome_woocommerce_assistant_options';
     private const NONCE_ACTION = 'yome_assistant_chat';
+    private const DEFAULT_INVENTORY_API_URL = 'https://yome-inventory-deploy-production.up.railway.app/api/products';
+    private const DEFAULT_INVENTORY_LOGIN_URL = 'https://yome-inventory-deploy-production.up.railway.app/api/login';
     private static $assets_loaded = false;
     private static $dashboard_rendered = false;
 
@@ -90,9 +92,9 @@ final class YOME_WooCommerce_Assistant {
         return [
             'endpoint_url' => 'https://repository-name-yome-ai-new-production.up.railway.app/site-chat',
             'widget_key' => '',
-            'inventory_enabled' => 'no',
-            'inventory_api_url' => '',
-            'inventory_login_url' => '',
+            'inventory_enabled' => 'yes',
+            'inventory_api_url' => self::DEFAULT_INVENTORY_API_URL,
+            'inventory_login_url' => self::DEFAULT_INVENTORY_LOGIN_URL,
             'inventory_api_key' => '',
             'inventory_username' => '',
             'inventory_password' => '',
@@ -104,7 +106,20 @@ final class YOME_WooCommerce_Assistant {
 
     private static function options(): array {
         $saved = get_option(self::OPTION_KEY, []);
-        return wp_parse_args(is_array($saved) ? $saved : [], self::defaults());
+        $saved = is_array($saved) ? $saved : [];
+        $options = wp_parse_args($saved, self::defaults());
+
+        if (empty($options['inventory_api_url']) || self::is_builtin_inventory_api_url((string) $options['inventory_api_url'])) {
+            $options['inventory_api_url'] = self::DEFAULT_INVENTORY_API_URL;
+        }
+        if (empty($options['inventory_login_url'])) {
+            $options['inventory_login_url'] = self::DEFAULT_INVENTORY_LOGIN_URL;
+        }
+        if (($saved['inventory_api_url'] ?? '') === '' && ($saved['inventory_enabled'] ?? '') === 'no') {
+            $options['inventory_enabled'] = 'yes';
+        }
+
+        return $options;
     }
 
     public static function admin_menu(): void {
@@ -197,8 +212,7 @@ final class YOME_WooCommerce_Assistant {
                         <td>
                             <input name="inventory_api_url" id="inventory_api_url" type="url" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_api_url']); ?>" />
-                            <p class="description">For the YOME inventory app, use <code>https://yome-inventory-deploy-production.up.railway.app/api/products</code>. Leave blank only for WordPress database auto-detect.</p>
-                            <p class="description">Built-in API after activation: <code><?php echo esc_html(rest_url('yome-assistant/v1/inventory')); ?></code></p>
+                            <p class="description">Use the real YOME warehouse app: <code><?php echo esc_html(self::DEFAULT_INVENTORY_API_URL); ?></code>. The member assistant does not use the old AI products CSV for inventory replies.</p>
                         </td>
                     </tr>
                     <tr>
@@ -206,7 +220,7 @@ final class YOME_WooCommerce_Assistant {
                         <td>
                             <input name="inventory_login_url" id="inventory_login_url" type="url" class="regular-text"
                                    value="<?php echo esc_attr($options['inventory_login_url']); ?>" />
-                            <p class="description">For the YOME inventory app, use <code>https://yome-inventory-deploy-production.up.railway.app/api/login</code>. If blank, it is auto-derived from <code>/api/products</code>.</p>
+                            <p class="description">Use <code><?php echo esc_html(self::DEFAULT_INVENTORY_LOGIN_URL); ?></code>. If blank, it is auto-derived from <code>/api/products</code>.</p>
                         </td>
                     </tr>
                     <tr>
@@ -403,11 +417,11 @@ final class YOME_WooCommerce_Assistant {
         }
         self::$assets_loaded = true;
 
-        wp_register_style('yome-assistant-widget', false, [], '1.0.9');
+        wp_register_style('yome-assistant-widget', false, [], '1.0.10');
         wp_enqueue_style('yome-assistant-widget');
         wp_add_inline_style('yome-assistant-widget', self::css());
 
-        wp_register_script('yome-assistant-widget', false, [], '1.0.9', true);
+        wp_register_script('yome-assistant-widget', false, [], '1.0.10', true);
         wp_enqueue_script('yome-assistant-widget');
         wp_add_inline_script('yome-assistant-widget', 'window.YOMEAssistantConfig = ' . wp_json_encode([
             'ajaxUrl' => admin_url('admin-ajax.php'),

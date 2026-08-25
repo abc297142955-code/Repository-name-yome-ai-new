@@ -1143,9 +1143,16 @@ YOME_INVENTORY_SALES_KEYS = {
     "salida", "salidas", "orders", "order_count", "销量", "销售量",
 }
 
+YOME_INVENTORY_DEFAULT_API_URL = "https://yome-inventory-deploy-production.up.railway.app/api/products"
+YOME_INVENTORY_DEFAULT_LOGIN_URL = "https://yome-inventory-deploy-production.up.railway.app/api/login"
+
+
+def yome_inventory_api_url() -> str:
+    return (os.getenv("YOME_INVENTORY_API_URL") or YOME_INVENTORY_DEFAULT_API_URL).strip()
+
 
 def yome_inventory_remote_enabled() -> bool:
-    return bool((os.getenv("YOME_INVENTORY_API_URL") or "").strip())
+    return bool(yome_inventory_api_url())
 
 
 def yome_inventory_search_query(message: str) -> str:
@@ -1249,6 +1256,9 @@ def yome_inventory_token_from_body(body: Any) -> str:
 
 
 def yome_inventory_default_login_url(api_url: str) -> str:
+    if api_url.strip() == YOME_INVENTORY_DEFAULT_API_URL:
+        return YOME_INVENTORY_DEFAULT_LOGIN_URL
+
     parsed = urllib.parse.urlparse(api_url)
     path = parsed.path or ""
     if path.endswith("/api/products"):
@@ -1279,7 +1289,7 @@ def yome_inventory_login_token(api_url: str, username: str, password: str, timeo
 
 
 def yome_remote_inventory_context(message: str, can_view_inventory_sales: bool = False, limit: int = 12) -> Dict[str, Any]:
-    api_url = (os.getenv("YOME_INVENTORY_API_URL") or "").strip()
+    api_url = yome_inventory_api_url()
     if not api_url:
         return {"enabled": False, "queried": False, "items": []}
 
@@ -1757,10 +1767,21 @@ def site_chat_needs_live_inventory(message: str, payload: Dict[str, Any], contex
     if source not in {"woocommerce", "wordpress", "site"}:
         return False
 
+    low = norm(message)
     if yome_catalog_intent(message):
         return True
 
     if isinstance(context, dict) and (context.get("queried") or context.get("search")):
+        return True
+
+    inventory_words = [
+        "mercancia", "mercancía", "mercancias", "mercancías", "producto", "productos",
+        "precio", "precios", "stock", "existencia", "disponible", "disponibles",
+        "nuevo", "nueva", "nuevos", "nuevas", "novedad", "novedades", "codigo",
+        "código", "sku", "mayor", "wholesale", "miembro", "catalogo", "catálogo",
+        "货", "库存", "产品", "商品", "价格", "会员价", "新品", "新货", "货号", "编码",
+    ]
+    if any(word in low for word in inventory_words):
         return True
 
     try:

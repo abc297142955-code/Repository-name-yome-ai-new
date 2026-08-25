@@ -17,6 +17,8 @@ Files
   - Adds a small animated YOME bunny mascot on the WooCommerce member dashboard
     with the label `AI YOME`.
   - Uses the YOME bunny image from `wordpress-plugin/assets/yome-bunny-assistant.png`.
+  - Defaults to the real YOME warehouse app at
+    `https://yome-inventory-deploy-production.up.railway.app/api/products`.
   - Can read the separate **YOME · INVENTARIO** JSON API and send that inventory
     context to the AI.
   - Also exposes a built-in bridge API at
@@ -47,14 +49,14 @@ Recommended variables:
 - `YOME_SITE_ALLOWED_ORIGIN`
   - Optional CORS origin, for example `https://yome.it.com`.
 - `YOME_INVENTORY_API_URL`
-  - Optional Railway-side live inventory source. Use
-    `https://yome-inventory-deploy-production.up.railway.app/api/products` for
-    the real YOME inventory app, or
+  - Railway-side live inventory source. If omitted, the app defaults to
+    `https://yome-inventory-deploy-production.up.railway.app/api/products`.
+    You can also use
     `https://yome.it.com/wp-json/yome-assistant/v1/inventory` after the
     WordPress bridge plugin is active.
 - `YOME_INVENTORY_LOGIN_URL`
-  - Optional login endpoint for the real YOME inventory app:
-    `https://yome-inventory-deploy-production.up.railway.app/api/login`.
+  - Optional login endpoint. If omitted with the default inventory URL, the app
+    uses `https://yome-inventory-deploy-production.up.railway.app/api/login`.
 - `YOME_INVENTORY_API_KEY`
   - Optional key sent as `X-YOME-Inventory-Key` and `Bearer` authorization when
     Railway pulls live YOME inventory.
@@ -79,15 +81,11 @@ WordPress install
 4. Set **YOME chat API** to:
    `https://repository-name-yome-ai-new-production.up.railway.app/site-chat`
 5. Set **Widget key** to the same value as `YOME_SITE_WIDGET_KEY`.
-6. Enable **YOME · INVENTARIO**. Leave **Inventory API URL** blank to let the
-   plugin auto-read real YOME warehouse tables from the same WordPress database.
-   If the correct table is not auto-detected, fill **YOME inventory table** with
-   the real warehouse table shown in the settings preview candidates.
-   To connect the separate YOME inventory app directly, set **Inventory API URL**
-   to `https://yome-inventory-deploy-production.up.railway.app/api/products`,
-   set **Inventory login URL** to
-   `https://yome-inventory-deploy-production.up.railway.app/api/login`, and fill
-   the inventory username/password in WordPress settings.
+6. Keep **YOME · INVENTARIO** enabled. The plugin defaults to the separate YOME
+   inventory app:
+   `https://yome-inventory-deploy-production.up.railway.app/api/products`.
+   Fill the inventory username/password in WordPress settings so the member
+   assistant can read this warehouse.
 7. Optional: use the built-in API URL
    `https://yome.it.com/wp-json/yome-assistant/v1/inventory` for testing after
    the plugin is active. It accepts `q` and `limit`.
