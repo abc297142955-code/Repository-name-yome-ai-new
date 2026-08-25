@@ -117,6 +117,9 @@ Membership behavior
 - New-arrival questions are sorted by `updated_at`, `created_at`,
   `created_date`, `fecha`, or similar date fields when the inventory API
   provides them.
+- Store-service questions such as `direccion de la tienda`,
+  `direcion de la tienda`, payment, hours, delivery, or location are answered
+  from YOME service info before any inventory lookup.
 - If **Inventory API URL** is blank, the plugin scans likely custom inventory
   tables and inventory-like columns such as `producto`, `cantidad`,
   `existencia`, `stock`, `precio`, `salida`, `tienda`, or `almacen`, maps

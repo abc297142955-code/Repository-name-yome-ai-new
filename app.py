@@ -949,7 +949,10 @@ def yome_extract_order_details(text: str) -> Dict[str, Any]:
     name = yome_line_value(text, ["nombre", "name", "cliente", "名字", "姓名", "联系人"])
     if name:
         details["customer_name"] = name
-    address = yome_line_value(text, ["direccion", "dirección", "address", "zona", "ubicacion", "ubicación", "地址", "区域"])
+    address = yome_line_value(text, [
+        "direccion", "dirección", "direcion", "dirrecion", "address",
+        "zona", "ubicacion", "ubicación", "地址", "区域",
+    ])
     if address:
         details["address"] = address
     if "transferencia" in low or "deposito" in low or "depósito" in low or "banco" in low or "转账" in low:
@@ -1578,7 +1581,11 @@ def handle_admin(phone: str, text: str, media_urls: List[str]) -> str:
 
 def customer_asks_location(text: str) -> bool:
     low = norm(text)
-    return any(k in low for k in ["donde estan", "ubicados", "ubicacion", "direccion", "donde queda", "local", "sucursal"])
+    return any(k in low for k in [
+        "donde estan", "ubicados", "ubicacion", "direccion", "direcion",
+        "dirrecion", "donde queda", "local", "sucursal", "tienda fisica",
+        "tienda física", "address", "location", "地址", "位置",
+    ])
 
 
 def customer_asks_payment(text: str) -> bool:
@@ -1588,7 +1595,11 @@ def customer_asks_payment(text: str) -> bool:
 
 def only_greeting(text: str) -> bool:
     low = norm(text)
-    business = ["tienes", "precio", "quiero", "busco", "necesito", "producto", "foto", "codigo", "pago", "cuenta", "direccion", "ubicacion"]
+    business = [
+        "tienes", "precio", "quiero", "busco", "necesito", "producto", "foto",
+        "codigo", "pago", "cuenta", "direccion", "direcion", "dirrecion",
+        "ubicacion",
+    ]
     if any(b in low for b in business):
         return False
     return low in ["hola", "buen dia", "buenos dias", "buenas", "hola buen dia", "hola buenos dias", "saludos"] or (len(low.split()) <= 4 and "hola" in low)
@@ -1743,7 +1754,7 @@ def site_chat_is_yome_question(message: str) -> bool:
         "yome", "hola", "buenas", "ayuda", "asesor", "tienda", "catalogo", "catalogo",
         "mercancia", "mercancía", "mercancias", "mercancías", "nuevo", "nueva", "nuevos", "nuevas",
         "producto", "productos", "precio", "precios", "mayor", "por mayor", "docena",
-        "comprar", "pedido", "orden", "pago", "transferencia", "banco", "direccion",
+        "comprar", "pedido", "orden", "pago", "transferencia", "banco", "direccion", "direcion",
         "ubicacion", "horario", "abierto", "envio", "delivery", "whatsapp", "contacto",
         "hogar", "cocina", "bano", "mueble", "muebles", "electronica", "ferreteria",
         "papeleria", "lampara", "silla", "mesa", "sofa", "organizador",
@@ -1818,6 +1829,22 @@ def site_chat():
             "status": "error",
             "message": "Escribe una pregunta sobre YOME para poder ayudarte.",
         }, 400)
+
+    if customer_asks_location(message):
+        return site_chat_json({
+            "status": "ok",
+            "reply": read_text_file(STORE_INFO_FILE, DEFAULT_STORE_INFO),
+            "assistant": "YOME",
+            "source": "store_info",
+        })
+
+    if customer_asks_payment(message):
+        return site_chat_json({
+            "status": "ok",
+            "reply": read_text_file(BANK_INFO_FILE, DEFAULT_BANK_INFO),
+            "assistant": "YOME",
+            "source": "payment_info",
+        })
 
     inventory_context = payload.get("yome_inventory_context")
     can_view_inventory_sales = bool(payload.get("can_view_inventory_sales"))
@@ -2168,7 +2195,7 @@ V22_DEFAULT_WORDS = {
     ],
     "location": [
         "donde estan", "donde están", "donde estan ubicados", "donde están ubicados",
-        "ubicacion", "ubicación", "direccion", "dirección", "donde queda",
+        "ubicacion", "ubicación", "direccion", "dirección", "direcion", "dirrecion", "donde queda",
         "local", "tienda fisica", "tienda física", "sucursal"
     ],
     "hours": [
@@ -2486,7 +2513,7 @@ def v22_only_greeting(text):
     business = [
         "tienes", "tiene", "hay", "precio", "cuanto", "cuánto", "quiero",
         "busco", "necesito", "producto", "foto", "codigo", "código",
-        "pago", "cuenta", "banco", "direccion", "dirección", "ubicacion",
+        "pago", "cuenta", "banco", "direccion", "dirección", "direcion", "dirrecion", "ubicacion",
         "ubicación", "envio", "envío", "delivery"
     ]
 
@@ -2939,6 +2966,8 @@ def dep_update_customer_profile(phone, text):
     addr_patterns = [
         r"direccion\s*[:：]\s*(.+)",
         r"dirección\s*[:：]\s*(.+)",
+        r"direcion\s*[:：]\s*(.+)",
+        r"dirrecion\s*[:：]\s*(.+)",
         r"zona\s*[:：]\s*(.+)",
         r"ubicacion\s*[:：]\s*(.+)",
         r"ubicación\s*[:：]\s*(.+)",
@@ -6593,8 +6622,14 @@ def yome_osn_extract_order_fields_v1(data, msg, phone):
     )
 
     address = (
-        yome_osn_find_value_v1(data, ["address", "direccion", "dirección", "delivery_address", "zona", "ubicacion", "ubicación"])
-        or yome_osn_line_value_v1(msg, ["direccion", "dirección", "zona", "ubicacion", "ubicación", "address", "地址"])
+        yome_osn_find_value_v1(data, [
+            "address", "direccion", "dirección", "direcion", "dirrecion",
+            "delivery_address", "zona", "ubicacion", "ubicación",
+        ])
+        or yome_osn_line_value_v1(msg, [
+            "direccion", "dirección", "direcion", "dirrecion", "zona",
+            "ubicacion", "ubicación", "address", "地址",
+        ])
     )
 
     product = (
@@ -6651,7 +6686,7 @@ def yome_osn_is_order_success_v1(data, msg):
     # 如果客户一次性发了姓名、地址、产品、数量、金额，认为是下单资料
     field_keys = [
         ["nombre", "name", "cliente", "名字"],
-        ["direccion", "dirección", "zona", "ubicacion", "地址"],
+        ["direccion", "dirección", "direcion", "dirrecion", "zona", "ubicacion", "地址"],
         ["producto", "productos", "articulo", "item", "产品"],
         ["cantidad", "cant", "qty", "unidades", "数量"],
         ["total", "monto", "amount", "金额"]
@@ -6955,7 +6990,7 @@ def yome_order_success_notify_v1():
             or ""
         ),
         "name": request.args.get("name") or request.form.get("name") or data.get("name") or data.get("nombre") or "",
-        "address": request.args.get("address") or request.form.get("address") or data.get("address") or data.get("direccion") or data.get("dirección") or "",
+        "address": request.args.get("address") or request.form.get("address") or data.get("address") or data.get("direccion") or data.get("dirección") or data.get("direcion") or data.get("dirrecion") or "",
         "product": request.args.get("product") or request.form.get("product") or data.get("product") or data.get("producto") or "",
         "quantity": request.args.get("quantity") or request.form.get("quantity") or data.get("quantity") or data.get("cantidad") or "",
         "amount": request.args.get("amount") or request.form.get("amount") or data.get("amount") or data.get("total") or data.get("monto") or "",

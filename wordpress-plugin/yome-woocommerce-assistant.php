@@ -2,7 +2,7 @@
 /**
  * Plugin Name: YOME WooCommerce Assistant
  * Description: Shows a cartoon YOME assistant for logged-in WooCommerce members and proxies questions to the YOME AI service.
- * Version: 1.0.10
+ * Version: 1.0.11
  * Author: YOME
  * Text Domain: yome-woocommerce-assistant
  */
@@ -417,11 +417,11 @@ final class YOME_WooCommerce_Assistant {
         }
         self::$assets_loaded = true;
 
-        wp_register_style('yome-assistant-widget', false, [], '1.0.10');
+        wp_register_style('yome-assistant-widget', false, [], '1.0.11');
         wp_enqueue_style('yome-assistant-widget');
         wp_add_inline_style('yome-assistant-widget', self::css());
 
-        wp_register_script('yome-assistant-widget', false, [], '1.0.10', true);
+        wp_register_script('yome-assistant-widget', false, [], '1.0.11', true);
         wp_enqueue_script('yome-assistant-widget');
         wp_add_inline_script('yome-assistant-widget', 'window.YOMEAssistantConfig = ' . wp_json_encode([
             'ajaxUrl' => admin_url('admin-ajax.php'),
@@ -639,6 +639,10 @@ final class YOME_WooCommerce_Assistant {
         $inventory_intent = self::inventory_question_intent($message_norm);
         $search = self::inventory_search_terms($message_norm);
         $can_view_inventory_sales = self::can_view_inventory_sales();
+
+        if (self::service_question_intent($message_norm)) {
+            return ['enabled' => true, 'queried' => false, 'items' => []];
+        }
 
         if (!$inventory_intent && $search === '') {
             return ['enabled' => true, 'queried' => false, 'items' => []];
@@ -1243,13 +1247,32 @@ final class YOME_WooCommerce_Assistant {
         return false;
     }
 
+    private static function service_question_intent(string $message_norm): bool {
+        $words = [
+            'direccion', 'direcion', 'dirrecion', 'ubicacion', 'donde estan',
+            'donde queda', 'tienda fisica', 'local', 'sucursal', 'address',
+            'location', 'pago', 'cuenta', 'banco', 'transferencia', 'deposito',
+            'metodo de pago', 'horario', 'abierto', 'hora', 'delivery', 'envio',
+            'entrega', '地址', '位置', '付款', '银行', '营业', '配送',
+        ];
+        foreach ($words as $word) {
+            if (strpos($message_norm, $word) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static function inventory_search_terms(string $message_norm): string {
         $stop_words = [
             'que', 'hay', 'tiene', 'tienen', 'precio', 'precios', 'quiero', 'buscar',
             'busco', 'dame', 'ver', 'mercancia', 'mercancias', 'producto', 'productos',
             'catalogo', 'inventario', 'stock', 'nuevo', 'nueva', 'nuevos', 'nuevas',
             'disponible', 'disponibles', 'ventas', 'vendido', 'vendidos', 'sales',
-            'sold', 'por', 'favor', 'yome', 'miembro', '会员价', '库存', '销量', '销售'
+            'sold', 'por', 'favor', 'yome', 'miembro', 'direccion', 'direcion',
+            'dirrecion', 'ubicacion', 'tienda', 'local', 'sucursal', 'pago',
+            'cuenta', 'banco', 'transferencia', 'deposito', 'horario', 'delivery',
+            'envio', 'entrega', '会员价', '库存', '销量', '销售'
         ];
         $tokens = preg_split('/\s+/', $message_norm);
         $kept = [];
